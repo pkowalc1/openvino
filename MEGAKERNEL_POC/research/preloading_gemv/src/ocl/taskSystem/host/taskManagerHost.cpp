@@ -1,11 +1,11 @@
 #include "taskManagerHost.h"
 
-#define CHECK_OCL_SUCCESS(stmt) \
-  {                             \
-    cl_int status = (stmt);     \
-    if (status != CL_SUCCESS) { \
-      return status;            \
-    }                           \
+#define CHECK_OCL_SUCCESS(stmt)    \
+  {                                \
+    const cl_int _status = (stmt); \
+    if (_status != CL_SUCCESS) {   \
+      return _status;              \
+    }                              \
   }
 
 /////////////////////////////////////////////////////////

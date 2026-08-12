@@ -22,6 +22,7 @@
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_memory.hpp"
 #include "ocl/ocl_event.hpp"
+#include "taskSystem/host/taskManagerHost.h"
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <cstdio>
@@ -527,16 +528,6 @@ static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(l
 // staying below the point where shared-cursor atomic_inc contention dominates.
 static constexpr int  MONO_WG = 32, MONO_LWS = 256;
 
-// Host mirrors of the device task-system structs (identical memory layout).
-struct TaskDescH {
-    int  type;
-    char payload[64 - sizeof(int)];
-};
-struct TaskManagerH {
-    const void* workQueue;
-    void*       processedTaskCount;
-    int         workQueueSize;
-};
 struct MonoCtxH {
     void* hs; void* h;
     void* wn; void* pn;
@@ -644,9 +635,9 @@ public:
 
         // Build the topologically-sorted task queue once. Each task carries the
         // context pointer plus its (layer, tile); the task `type` selects the stage.
-        std::vector<TaskDescH> queue;
+        std::vector<TaskDesc> queue;
         auto push = [&](int type, int layer, int tile) {
-            TaskDescH d{};
+            TaskDesc d{};
             d.type = type;
             MkTaskH t{};
             t.ctx = mCtx_;
@@ -664,25 +655,17 @@ public:
             for (int i = 0; i < NT_E;  i++) push(4, L, i);   // Stage E  (gate/up)
             for (int i = 0; i < NT_F;  i++) push(5, L, i);   // Stage F  (down)
         }
-        workQueueSize_ = static_cast<int>(queue.size());
-
         auto& strm = instance.get_network().get_stream();
         cl_command_queue q = downcast<ocl_stream>(strm).get_cl_queue().get();
-        mQueue_   = ualloc(queue.size() * sizeof(TaskDescH));
-        mCounter_ = ualloc(sizeof(int));
-        int zero = 0;
-        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mQueue_, queue.data(),
-                                   queue.size() * sizeof(TaskDescH), 0, nullptr, nullptr) == CL_SUCCESS,
-                        "[MegaKernel] queue upload failed");
-        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCounter_, &zero, sizeof(int), 0, nullptr, nullptr) == CL_SUCCESS,
-                        "[MegaKernel] counter init failed");
+        err = HostInitalizeTaskSystem(taskManager_, queue, dev_, ctx_, q);
+        OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
 
         // TaskManager descriptor consumed by the kernel as a __constant buffer.
-        TaskManagerH tm{};
-        tm.workQueue = mQueue_;
-        tm.processedTaskCount = mCounter_;
-        tm.workQueueSize = workQueueSize_;
-        mTaskMgr_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(tm), &tm, &err);
+        mTaskMgr_ = clCreateBuffer(ctx_,
+                       CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                       sizeof(taskManager_),
+                       &taskManager_,
+                       &err);
         OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(taskManager): ", err);
 
         OPENVINO_ASSERT(clSetKernelArg(kTask_, 0, sizeof(cl_mem), &mTaskMgr_) == CL_SUCCESS,
@@ -798,7 +781,6 @@ public:
                             "[MegaKernel] context update failed");
             // Zero the stage counters and the FIFO cursor before the workers start.
             usmMemFill_(q, mSync_,    &pat, 1, SYNC_N * sizeof(int), 0, nullptr, nullptr);
-            usmMemFill_(q, mCounter_, &pat, 1, sizeof(int),          0, nullptr, nullptr);
             size_t g = (size_t)workers * MONO_LWS, l = (size_t)MONO_LWS;
             cl_int r = clEnqueueNDRangeKernel(q, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
             OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
@@ -826,9 +808,8 @@ private:
     void* mKC_=nullptr; void* mVC_=nullptr;
     void* mSync_=nullptr; void* mCtx_=nullptr;
     // Task-system state: work queue, FIFO cursor and the __constant descriptor.
-    void*  mQueue_=nullptr; void* mCounter_=nullptr;
+    TaskManager taskManager_{};
     cl_mem mTaskMgr_=nullptr;
-    int    workQueueSize_ = 0;
 };
 
 }  // namespace

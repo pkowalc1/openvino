@@ -52,6 +52,10 @@ ov_gpu_add_backend_target(
         ADD_CLANG_FORMAT
 )
 
+    set(TASK_SYSTEM_ROOT "${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/research/preloading_gemv/src/ocl")
+    target_sources(${TARGET_NAME} PRIVATE "${TASK_SYSTEM_ROOT}/taskSystem/host/taskManagerHost.cpp")
+    target_include_directories(${TARGET_NAME} PRIVATE "${TASK_SYSTEM_ROOT}")
+
 ov_build_target_faster(${TARGET_NAME} PCH)
 
 if(GPU_RT_TYPE STREQUAL "SYCL")
