@@ -18,5 +18,7 @@
 typedef struct TaskManager {
   GLOBAL_DEVICE_PTR const TaskDesc* workQueue;
   GLOBAL_DEVICE_PTR int* processedTaskCount;
+  GLOBAL_DEVICE_PTR int* syncBuffer;
+  int syncBufferSize;
   int workQueueSize;
 } TaskManager;

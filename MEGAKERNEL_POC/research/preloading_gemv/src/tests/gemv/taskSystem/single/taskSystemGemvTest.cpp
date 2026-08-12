@@ -117,8 +117,8 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
               << " tasks and " << workerCount << " workers...\n";
 
     TaskManager taskManager;
-    ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(taskManager, tasks, deviceId(),
-                                               context(), queue()));
+    ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(taskManager, tasks, nullptr, 0,
+                                               deviceId(), context(), queue()));
     cl_mem taskManagerBuffer =
         clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                        sizeof(taskManager), &taskManager, &status);

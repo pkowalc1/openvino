@@ -39,7 +39,7 @@ inline void TEMPLATE(WorkerMainLoop_block, WorkerMainLoop_block_SUFFIX)(
     taskPtr = GetNextTask_block(taskManager, slmBuffer);
   }
 
-  LastWorkerClearTaskManagerState_block(taskManager);
+  LastWorkerClearTaskManagerState_block(taskManager, slmBuffer);
 }
 
 #undef WorkerMainLoop_block_EXEC_FUN

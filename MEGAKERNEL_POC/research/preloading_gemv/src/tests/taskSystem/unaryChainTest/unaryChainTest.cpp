@@ -116,9 +116,9 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
   }
 
   TaskManager taskManager;
-  ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(taskManager,
-                                             topologicallySortedTaskQueue,
-                                             deviceId(), context(), queue()));
+  ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(
+      taskManager, topologicallySortedTaskQueue, syncGPU, TILE_COUNT,
+      deviceId(), context(), queue()));
   cl_mem taskManagerBuffer =
       clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                      sizeof(taskManager), &taskManager, &status);

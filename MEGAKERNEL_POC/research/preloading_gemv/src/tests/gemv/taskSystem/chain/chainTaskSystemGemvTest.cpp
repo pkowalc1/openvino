@@ -264,8 +264,10 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
   }
 
   TaskManager taskManager;
-  ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(taskManager, tasks, deviceId(),
-                                             context(), queue()));
+  ASSERT_OCL_SUCCESS(
+      HostInitalizeTaskSystem(taskManager, tasks, completionCountsGpu,
+                              static_cast<int>(clearedCompletionCounts.size()),
+                              deviceId(), context(), queue()));
   cl_mem taskManagerBuffer =
       clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                      sizeof(taskManager), &taskManager, &status);

@@ -11,6 +11,7 @@
 /////////////////////////////////////////////////////////
 cl_int HostInitalizeTaskSystem(TaskManager& taskManager,
                                std::vector<TaskDesc>& tasksQueue,
+                               int* gpuSyncBufferToClear, int bufferSize,
                                cl_device_id deviceId, cl_context context,
                                cl_command_queue queue) {
   const int ZERO = 0;
@@ -42,6 +43,8 @@ cl_int HostInitalizeTaskSystem(TaskManager& taskManager,
   taskManager.workQueue = taskQueueGPU;
   taskManager.workQueueSize = static_cast<int>(tasksQueue.size());
   taskManager.processedTaskCount = nextTaskIDGPU;
+  taskManager.syncBuffer = gpuSyncBufferToClear;
+  taskManager.syncBufferSize = bufferSize;
 
   return CL_SUCCESS;
 }

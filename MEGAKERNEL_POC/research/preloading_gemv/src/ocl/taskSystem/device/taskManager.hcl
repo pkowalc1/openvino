@@ -8,7 +8,8 @@ __global const TaskDesc* GetNextTask_block(TaskManager taskManager,
                                            __local char* slmBuffer);
 
 // Clear the state of the task manager.
-void LastWorkerClearTaskManagerState_block(TaskManager taskManager);
+void LastWorkerClearTaskManagerState_block(TaskManager taskManager,
+                                           __local char* slmBuffer);
 
 ///////////////////////////////////////////////////////////////
 //
@@ -51,21 +52,34 @@ inline void ClearTaskManagerState_thread(TaskManager taskManager) {
 }
 
 /////////////////////////////////////////////////////////////
-inline void LastWorkerClearTaskManagerState_block(TaskManager taskManager) {
+inline void LastWorkerClearTaskManagerState_block(TaskManager taskManager,
+                                                  __local char* slmBuffer) {
   barrier(CLK_LOCAL_MEM_FENCE);
+
+  __local bool* isLastWorker_local = (__local bool*)slmBuffer;
 
   if (get_local_id(0) == 0) {
     volatile __global atomic_int* syncBuffer =
         (volatile __global atomic_int*)(taskManager.processedTaskCount);
     const int processed = atomic_load_explicit(syncBuffer, memory_order_acquire,
                                                memory_scope_device);
-
     const int workers =
         get_num_groups(0) * get_num_groups(1) * get_num_groups(2);
+    isLastWorker_local[0] = (processed == workers + taskManager.workQueueSize);
+  }
 
-    // Last executing worker clears the task manager state.
-    if (processed == workers + taskManager.workQueueSize) {
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  bool isLastWorker = isLastWorker_local[0];
+
+  if (isLastWorker) {
+    if (get_local_id(0) == 0) {
       ClearTaskManagerState_thread(taskManager);
+    }
+    // CLear sync buffer for next launch:
+    for (int i = get_local_id(0); i < taskManager.syncBufferSize;
+         i += get_local_size(0)) {
+      taskManager.syncBuffer[i] = 0;
     }
   }
 }
