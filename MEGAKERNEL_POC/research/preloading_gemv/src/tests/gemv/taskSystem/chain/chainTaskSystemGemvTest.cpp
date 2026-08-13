@@ -300,7 +300,6 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
       queue(), CL_TRUE, outputBeforeHalf.data(), vectorsGpu.back(),
       outputBeforeHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
 
-  std::cout << "Benchmarking three-GEMV task-system chain...\n";
   const ocltest::ProfileResult taskSystemProfile =
       ocltest::ProfileOpenCL<ocltest::CLEAR_CACHE_BEFORE_BENCHMARK>(
 
@@ -354,10 +353,13 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   const std::vector<float> input =
       utils::createRandomBuffer(GEMV_OPT_PARAMS.front().columnCount, 3);
 
+  std::cout << "Benchmarking three-GEMV task-system chain...\n";
   const ocltest::GemvBenchmarkResult taskSystemResult =
       benchmarkTaskSystemChain(matrices, input, TASK_SYSTEM_GEMV_PARAMS);
+  std::cout << "Benchmarking three-GEMV OpenCL chain...\n";
   const ocltest::GemvBenchmarkResult openClResult = benchmarkOpenClGemvChain(
       matrices, input, GEMV_OPT_PARAMS, GEMV_KERNEL_PATH);
+  std::cout << "Benchmarking three-GEMV oneDNN chain...\n";
   const ocltest::GemvBenchmarkResult dnnlResult =
       benchmarkDnnlGemvChain(matrices, input, GEMV_OPT_PARAMS);
 
