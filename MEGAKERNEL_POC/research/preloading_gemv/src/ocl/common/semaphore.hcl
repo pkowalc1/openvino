@@ -16,7 +16,7 @@ inline void SignalSemaphore_block(int warpID,
 // INLINES:
 //
 //////////////////////////////////////////////////////////////////////////////////////
-
+extern void __builtin_IB_eu_thread_pause(uint);
 //////////////////////////////////////////////////////////////////////////////////////
 inline void WaitForSemaphore_block(int warpID,
                                    volatile __global atomic_int* syncMemory,
@@ -26,6 +26,7 @@ inline void WaitForSemaphore_block(int warpID,
     if (get_sub_group_id() == warpID && get_sub_group_local_id() == 0) {
       while (atomic_load_explicit(syncMemory, memory_order_relaxed,
                                   memory_scope_device) < wantedSyncVal) {
+        __builtin_IB_eu_thread_pause(32);
       }
       // This is needed to ensure global visibility of the operations of
       // producer, since barrier(CLK_GLOBAL_MEM_FENCE) only works at the
