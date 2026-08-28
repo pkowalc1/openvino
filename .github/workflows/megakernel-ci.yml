@@ -16,9 +16,11 @@ jobs:
         run: docker image inspect pk_dev_image
 
       - name: Run workflow commands inside local Docker image
+        env:
+          WORKSPACE_REPO: ${{ github.workspace }}/repo
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}/repo:/workspace/repo" \
+            -v "$WORKSPACE_REPO:/workspace/repo" \
             -w /workspace/repo \
             pk_dev_image \
             bash -lc '
