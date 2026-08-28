@@ -4,6 +4,8 @@ on: [push]
 jobs:
   Explore-GitHub-Actions:
     runs-on: self-hosted
+    permissions:
+      contents: read
     steps:
       - name: Check out repository code
         uses: actions/checkout@v6
