@@ -16,7 +16,7 @@ main() {
     export LD_LIBRARY_PATH="${genai_build_dir}/openvino_genai${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
     python -c "import openvino_genai; print(openvino_genai.__version__)"
-    bash "${repo_root}/MEGAKERNEL_POC/benchmark_app.sh"
+    #bash "${repo_root}/MEGAKERNEL_POC/benchmark_app.sh"
     python "${repo_root}/MEGAKERNEL_POC/python/e2e_performance_measurement.py" \
         --frameworks decode_only optimum genai \
         --torch-threads 20

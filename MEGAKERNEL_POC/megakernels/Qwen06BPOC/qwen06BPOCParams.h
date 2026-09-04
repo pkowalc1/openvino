@@ -26,6 +26,18 @@ public:
     void* position_ids;
     void* hidden_states_out;
     int newTokens;
+
+    // Hand-over of a KV cache produced outside the megakernel (the OpenVINO
+    // prefill path). When import_past is set, the runtime copies past_len tokens
+    // of every layer/head into its own cache before running the decode step.
+    // Each array holds one entry per layer; a layer's buffer is laid out as
+    // [num_kv_heads, <its own> seq stride, head_dim] halfs.
+    const void* const* past_key = nullptr;
+    const void* const* past_value = nullptr;
+    const int* past_key_stride = nullptr;
+    const int* past_value_stride = nullptr;
+    int past_len = 0;
+    bool import_past = false;
 };
 
 class Qwen06BPlatformParams : public IPlatformParams {

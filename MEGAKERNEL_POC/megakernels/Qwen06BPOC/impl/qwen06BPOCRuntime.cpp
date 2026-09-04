@@ -705,6 +705,31 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     runtimeContext_.out = io->hidden_states_out;
     const uint newTokens = io->newTokens;
 
+    // Take over a KV cache filled by someone else (the OpenVINO prefill path).
+    // Source is [KVH, <per-tensor stride>, HD] per layer; destination [NUM_L, KVH, MAX_SEQ, HD].
+    if (io->import_past && io->past_len > 0) {
+        assert_or_throw(io->past_key && io->past_value && io->past_key_stride && io->past_value_stride,
+                        "[MegaKernel] import_past without past pointers");
+        assert_or_throw(io->past_len <= MAX_SEQ, "[MegaKernel] imported KV cache longer than MAX_SEQ");
+        const size_t row_bytes = (size_t)io->past_len * HD * sizeof(unsigned short);
+        for (int l = 0; l < NUM_L; l++) {
+            const auto* src_k = static_cast<const unsigned short*>(io->past_key[l]);
+            const auto* src_v = static_cast<const unsigned short*>(io->past_value[l]);
+            assert_or_throw(src_k && src_v, "[MegaKernel] null KV pointer for layer ", l);
+            for (int h = 0; h < KVH; h++) {
+                const size_t dst_off = ((size_t)l * KVH + h) * MAX_SEQ * HD;
+                assert_or_throw(usmMemcpy_(stream_, CL_FALSE, static_cast<unsigned short*>(mKC_) + dst_off,
+                                           src_k + (size_t)h * io->past_key_stride[l] * HD,
+                                           row_bytes, 0, nullptr, nullptr) == CL_SUCCESS,
+                                "[MegaKernel] KV import (key) failed");
+                assert_or_throw(usmMemcpy_(stream_, CL_FALSE, static_cast<unsigned short*>(mVC_) + dst_off,
+                                           src_v + (size_t)h * io->past_value_stride[l] * HD,
+                                           row_bytes, 0, nullptr, nullptr) == CL_SUCCESS,
+                                "[MegaKernel] KV import (value) failed");
+            }
+        }
+    }
+
     // Co-resident worker count (see MONO_WG note). Tunable via env.
     static const int workers = [] {
         const char* v = std::getenv("OV_MEGAKERNEL_MONO_WG");

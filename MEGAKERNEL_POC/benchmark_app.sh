@@ -28,16 +28,29 @@ np.save(input_dir / "position_ids.npy", np.array([[attention_mask_size - 1]], dt
 np.save(input_dir / "beam_idx.npy", np.array([0], dtype=np.int32))
 PY
 
-ZE_AFFINITY_MASK=0 "${benchmark_app_path}" \
-	-m "${model_path}" \
-	-d GPU \
-	-hint latency \
-	-api sync \
-	-nireq 1 \
-	-niter 100 \
-	-data_shape "input_ids[1,1],attention_mask[1,${attention_mask_size}],position_ids[1,1],beam_idx[1]" \
-	-i \
-	"input_ids:${input_dir}/input_ids.npy" \
-	"attention_mask:${input_dir}/attention_mask.npy" \
-	"position_ids:${input_dir}/position_ids.npy" \
+bench_args=(
+	-m "${model_path}"
+	-d GPU
+	-hint latency
+	-api sync
+	-nireq 1
+	-niter 100
+	-data_shape "input_ids[1,1],attention_mask[1,${attention_mask_size}],position_ids[1,1],beam_idx[1]"
+	-i
+	"input_ids:${input_dir}/input_ids.npy"
+	"attention_mask:${input_dir}/attention_mask.npy"
+	"position_ids:${input_dir}/position_ids.npy"
 	"beam_idx:${input_dir}/beam_idx.npy"
+)
+
+set +e
+ZE_AFFINITY_MASK=0 "${benchmark_app_path}" "${bench_args[@]}"
+status=$?
+set -e
+
+if [[ ${status} -ne 0 ]]; then
+	echo "benchmark_app exited with status ${status}; re-running under gdb for a backtrace..." >&2
+	ZE_AFFINITY_MASK=0 gdb -q -batch -ex run -ex "thread apply all bt full" -ex quit \
+		--args "${benchmark_app_path}" "${bench_args[@]}" || true
+	exit "${status}"
+fi
