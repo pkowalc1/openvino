@@ -1,6 +1,12 @@
 name: Megakernel-CI
 run-name: Megakernel CI Benchmark/Tests
-on: [push, workflow_dispatch, pull_request]
+on:
+  push:
+    branches:
+    - megakernel_poc_2026_master_branch
+  pull_request:
+  workflow_dispatch:
+
 jobs:
   Megakernel-CI:
     runs-on: self-hosted
