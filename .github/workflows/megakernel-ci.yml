@@ -7,6 +7,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          sudo chmod -R 777 ${{ github.workspace }} || true
+          rm -rf ${{ github.workspace }}/* || true
+
       - name: Check out repository code
         uses: actions/checkout@v6
         with:
@@ -64,8 +70,3 @@ jobs:
               echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
-      - name: Cleanup workspace
-        if: always()
-        run: |
-          sudo chmod -R 777 ${{ github.workspace }} || true
-          rm -rf ${{ github.workspace }}/* || true
