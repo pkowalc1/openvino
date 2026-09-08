@@ -29,7 +29,7 @@ jobs:
       - name: Check out genai
         uses: actions/checkout@v6
         with:
-          path: ./repo
+          path: ./repo/openvino.genai
           submodules: 'recursive'
           repository: openvinotoolkit/openvino.genai
 
