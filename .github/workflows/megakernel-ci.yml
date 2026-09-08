@@ -30,7 +30,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: ./repo
-          clean: true
           submodules: 'recursive'
           repository: openvinotoolkit/openvino.genai
 
