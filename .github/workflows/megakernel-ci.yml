@@ -32,7 +32,7 @@ jobs:
           path: ./repo/openvino.genai
           submodules: 'recursive'
           repository: openvinotoolkit/openvino.genai
-          branch: 2026.3.0.0
+          ref: 2026.3.0.0
 
       - name: Compile ov with megakernel
         env:
