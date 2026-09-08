@@ -17,8 +17,6 @@ main() {
     python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
         --output-dir "${repo_root}/MEGAKERNEL_POC/python/qwen3-0.6b-openvino-ir"
 
-    git clone --recursive https://github.com/openvinotoolkit/openvino.genai.git
-
     cmake -S "${repo_root}" -B "${build_dir}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DENABLE_DEBUG_CAPS=ON \

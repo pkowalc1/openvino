@@ -25,6 +25,14 @@ jobs:
           path: ./repo
           clean: true
           submodules: 'recursive'
+      
+      - name: Check out GENAI
+        uses: actions/checkout@v6
+        with:
+          path: ./repo
+          clean: true
+          submodules: 'recursive'
+          repository: https://github.com/openvinotoolkit/openvino.genai.git
 
       - name: Compile ov with megakernel
         env:
