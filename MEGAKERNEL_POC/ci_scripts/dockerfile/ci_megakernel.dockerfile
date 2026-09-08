@@ -1,12 +1,12 @@
 FROM ubuntu:24.04
 
 # Set proxies
-ENV http_proxy http://proxy-igk.intel.com:911
-ENV https_proxy http://proxy-igk.intel.com:912
-
-RUN echo "export http_proxy=http://proxy-igk.intel.com:911" >>  ~/.bashrc
-RUN echo "export https_proxy=http://proxy-igk.intel.com:912" >>  ~/.bashrc
-RUN echo "export no_proxy=localhost,127.0.0.1,sclab.intel.com,.corp.intel.com,corp.intel.com,ubit-artifactory-or.intel.com,.sclab.intel.com,devtools.intel.com,.devtools.intel.com,icloud.intel.com,.icloud.intel.com,appsecapi.intel.com,onecloudapi.intel.com,oneclouddemoapi.intel.com" >>  ~/.bashrc
+ENV http_proxy=http://proxy-igk.intel.com:911 \
+  https_proxy=http://proxy-igk.intel.com:912 \
+  HTTP_PROXY=http://proxy-igk.intel.com:911 \
+  HTTPS_PROXY=http://proxy-igk.intel.com:912 \
+  no_proxy=localhost,127.0.0.1,sclab.intel.com,.corp.intel.com,corp.intel.com,ubit-artifactory-or.intel.com,.sclab.intel.com,devtools.intel.com,.devtools.intel.com,icloud.intel.com,.icloud.intel.com,appsecapi.intel.com,onecloudapi.intel.com,oneclouddemoapi.intel.com \
+  NO_PROXY=localhost,127.0.0.1,sclab.intel.com,.corp.intel.com,corp.intel.com,ubit-artifactory-or.intel.com,.sclab.intel.com,devtools.intel.com,.devtools.intel.com,icloud.intel.com,.icloud.intel.com,appsecapi.intel.com,onecloudapi.intel.com,oneclouddemoapi.intel.com
 
 RUN apt update
 
