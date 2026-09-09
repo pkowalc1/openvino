@@ -40,6 +40,8 @@ jobs:
             bash -lc '
               set -Eeuo pipefail
               git config --global --add safe.directory /workspace/repo
+              git config --global user.email "ci@openvino.local"
+              git config --global user.name "CI Megakernel"
               github_auth=$(printf "x-access-token:%s" "$GITHUB_TOKEN" | base64 -w0)
               git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $github_auth"
               unset github_auth GITHUB_TOKEN
