@@ -70,6 +70,12 @@ PROMPTS: list[dict[str, str]] = [
             "reduce the achievable speedup on a small GPU."
         ),
     },
+    {
+        "name": "v. long",
+        "text": (
+            200 * "You are a senior systems engineer. Read the following background and talk about CPU cache "
+        ),
+    },
 ]
 
 
@@ -336,8 +342,7 @@ def genai_worker(args) -> list[dict]:
     # CACHE_DIR="" disables the compiled-model blob cache (see optimum_worker).
     # Baseline uses GenAI's default PagedAttention backend.
     pipeline_kwargs: dict = {"CACHE_DIR": ""}
-    if args.path == "megakernel":
-        pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
+    pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
     pipe = ov_genai.LLMPipeline(args.model_dir, args.device, **pipeline_kwargs)
     compile_s = time.perf_counter() - t0
 

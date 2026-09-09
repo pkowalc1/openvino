@@ -41,3 +41,17 @@ ZE_AFFINITY_MASK=0 "${benchmark_app_path}" \
 	"attention_mask:${input_dir}/attention_mask.npy" \
 	"position_ids:${input_dir}/position_ids.npy" \
 	"beam_idx:${input_dir}/beam_idx.npy"
+
+OV_MEGAKERNEL_DISABLE=1 ZE_AFFINITY_MASK=0 "${benchmark_app_path}" \
+	-m "${model_path}" \
+	-d GPU \
+	-hint latency \
+	-api sync \
+	-nireq 1 \
+	-niter 100 \
+	-data_shape "input_ids[1,1],attention_mask[1,${attention_mask_size}],position_ids[1,1],beam_idx[1]" \
+	-i \
+	"input_ids:${input_dir}/input_ids.npy" \
+	"attention_mask:${input_dir}/attention_mask.npy" \
+	"position_ids:${input_dir}/position_ids.npy" \
+	"beam_idx:${input_dir}/beam_idx.npy"
