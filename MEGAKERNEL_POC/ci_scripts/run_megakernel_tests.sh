@@ -10,9 +10,10 @@ main() {
     python3 -m venv --system-site-packages "${venv_dir}"
     source "${venv_dir}/bin/activate"
 
-    python -m pip install "${build_dir}"/wheels/*.whl --force-reinstall
     export PYTHONPATH="${build_dir}${PYTHONPATH:+:${PYTHONPATH}}"
     export LD_LIBRARY_PATH="${build_dir}/openvino_genai${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+    python -m pip install "${build_dir}"/wheels/*.whl --force-reinstall
 
     python -c "import openvino_genai; print(openvino_genai.__version__)"
     bash "${repo_root}/MEGAKERNEL_POC/benchmark_app.sh"
