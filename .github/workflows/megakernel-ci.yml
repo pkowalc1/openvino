@@ -1,55 +1,57 @@
 name: Megakernel-CI
 run-name: Megakernel CI Benchmark/Tests
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches:
+    - megakernel_poc_2026_master_branch
+  pull_request:
+  workflow_dispatch:
+
 jobs:
   Megakernel-CI:
     runs-on: self-hosted
     permissions:
       contents: read
     steps:
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          sudo chmod -R 777 ${{ github.workspace }} || true
+          rm -rf ${{ github.workspace }}/* || true
+
       - name: Check out repository code
         uses: actions/checkout@v6
         with:
-          path: ./repo
           clean: true
           submodules: 'recursive'
 
       - name: Compile ov with megakernel
         env:
-          WORKSPACE_REPO: ${{ github.workspace }}/repo
+          WORKSPACE_REPO: ${{ github.workspace }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
             -w /workspace/repo \
+            -e GITHUB_TOKEN \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
               set -Eeuo pipefail
               git config --global --add safe.directory /workspace/repo
+              git config --global user.email "ci@openvino.local"
+              git config --global user.name "CI Megakernel"
+              github_auth=$(printf "x-access-token:%s" "$GITHUB_TOKEN" | base64 -w0)
+              git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $github_auth"
+              unset github_auth GITHUB_TOKEN
               echo "building megakernel:"
               bash MEGAKERNEL_POC/ci_scripts/build_megakernel.sh
               echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
-      - name: Compile OpenVINO GenAI
-        env:
-          WORKSPACE_REPO: ${{ github.workspace }}/repo
-        run: |
-          docker run --rm \
-            -v "$WORKSPACE_REPO:/workspace/repo" \
-            -w /workspace/repo \
-            ci_megakernel_image \
-            bash -lc '
-              set -Eeuo pipefail
-              git config --global --add safe.directory /workspace/repo
-              echo "building OpenVINO GenAI:"
-              bash MEGAKERNEL_POC/ci_scripts/build_genai.sh
-              echo "DONE! This job'\''s status is ${{ job.status }}."
-            '
-
       - name: Run tests and benchmarks
         env:
-          WORKSPACE_REPO: ${{ github.workspace }}/repo
+          WORKSPACE_REPO: ${{ github.workspace }}
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
@@ -64,8 +66,3 @@ jobs:
               echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
-      - name: Cleanup workspace
-        if: always()
-        run: |
-          sudo chmod -R 777 ${{ github.workspace }} || true
-          rm -rf ${{ github.workspace }}/* || true
