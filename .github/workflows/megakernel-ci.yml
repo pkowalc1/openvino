@@ -22,13 +22,12 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v6
         with:
-          path: ./repo
           clean: true
           submodules: 'recursive'
 
       - name: Compile ov with megakernel
         env:
-          WORKSPACE_REPO: ${{ github.workspace }}/repo
+          WORKSPACE_REPO: ${{ github.workspace }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           docker run --rm \
@@ -52,7 +51,7 @@ jobs:
 
       - name: Run tests and benchmarks
         env:
-          WORKSPACE_REPO: ${{ github.workspace }}/repo
+          WORKSPACE_REPO: ${{ github.workspace }}
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
