@@ -5,15 +5,22 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
+openvino_version="2026.3.0"
+tokenizers_version="2026.3.0.0"
 
 main() {
-    python3 -m venv --system-site-packages "${venv_dir}"
+    python3 -m venv "${venv_dir}"
     source "${venv_dir}/bin/activate"
 
     chmod +x "${repo_root}/install_build_dependencies.sh"
     "${repo_root}/install_build_dependencies.sh"
 
-    python -m pip install --upgrade optimum-intel
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install --upgrade "optimum-intel[openvino]" accelerate
+    python -m pip install \
+        "openvino==${openvino_version}" \
+        "openvino-tokenizers==${tokenizers_version}" \
+        --force-reinstall --no-deps
     python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
         --output-dir "${repo_root}/MEGAKERNEL_POC/python/qwen3-0.6b-openvino-ir"
 
