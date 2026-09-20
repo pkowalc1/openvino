@@ -38,9 +38,11 @@ Similar work (see references) usually claims speedups of 1.2x to 1.7x.
 We aim for a similar speedup.
 
 **4. How to build**
+
 For local build, use ./MEGAKERNEL_POC/compile_run_megakernel.sh. This will install all needed deps, build and run e2e benchmarks locally.
 
 **5. Code structure**
+
 * MEGAKERNEL_POC/megakernels - contains various megakernels implemented for Qwen3 0.6B - each megakernel is implemented as a separate shared library. You can select megakernel implementation with cmake build flag, e.g. -DMEGAKERNEL_IMPLEMENTATION=Qwen06BPOC_prefill_separate_kernels
 
 * MEGAKERNEL_POC/python - contains python tools to e.g. export the model
@@ -51,7 +53,7 @@ For local build, use ./MEGAKERNEL_POC/compile_run_megakernel.sh. This will insta
 
 * On the OV side we have added a custom transformation and a separate Megakernel operator that calls shared lib with actual megakernel impl.
 
-**5. References:**
+**6. References:**
 
 1) Mirage Persistent Kernel: A Compiler and Runtime for Mega-Kernelizing Tensor Programs (https://arxiv.org/pdf/2512.22219)
 2) Ada-MK: Adaptive MegaKernel Optimization via Automated
