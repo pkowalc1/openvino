@@ -16,7 +16,7 @@ main() {
     python -m pip install "${build_dir}"/wheels/*.whl --force-reinstall
 
     python -c "import openvino_genai; print(openvino_genai.__version__)"
-    bash "${repo_root}/MEGAKERNEL_POC/benchmark_app.sh"
+    bash "${repo_root}/MEGAKERNEL_POC/scripts/benchmark_app.sh"
     python "${repo_root}/MEGAKERNEL_POC/python/e2e_performance_measurement.py" \
         --frameworks decode_only optimum genai \
         --torch-threads 20
