@@ -3,8 +3,10 @@ set -euo pipefail
 
 attention_mask_size=1
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-model_path="${script_dir}/python/qwen3-0.6b-openvino-ir/openvino_model.xml"
-benchmark_app_path="${script_dir}/../bin/intel64/Release/benchmark_app"
+megakernel_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${megakernel_root}/.." && pwd)"
+model_path="${megakernel_root}/python/qwen3-0.6b-openvino-ir/openvino_model.xml"
+benchmark_app_path="${repo_root}/bin/intel64/Release/benchmark_app"
 
 if [[ ! -x "${benchmark_app_path}" ]]; then
 	echo "Error: benchmark_app executable not found or not executable: ${benchmark_app_path} -> fix hardcoded path in the script!" >&2
