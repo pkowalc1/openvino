@@ -12,6 +12,32 @@ build_jobs="${MEGAKERNEL_BUILD_JOBS:-16}"
 openvino_version="2026.3.0"
 tokenizers_version="2026.3.0.0"
 
+clean_generated_artifacts() {
+    local artifact
+    local artifacts=(
+        "${build_dir}"
+        "${repo_root}/bin"
+        "${repo_root}/temp"
+        "${genai_dir}"
+        "${model_dir}"
+    )
+
+    for artifact in "${artifacts[@]}"; do
+        case "${artifact}" in
+            "${build_dir}"|"${repo_root}/bin"|"${repo_root}/temp"|"${genai_dir}"|"${model_dir}") ;;
+            *)
+                echo "Refusing to remove unexpected path: ${artifact}" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -e "${artifact}" || -L "${artifact}" ]]; then
+            echo "Removing ${artifact}"
+            rm -rf -- "${artifact}"
+        fi
+    done
+}
+
 activate_venv() {
     if [[ ! -x "${python_bin}" ]]; then
         python3 -m venv "${venv_dir}"
@@ -108,6 +134,15 @@ set_runtime_environment() {
     export LD_LIBRARY_PATH="${repo_root}/bin/intel64/Release:${repo_root}/bin/intel64/Release/lib:${build_dir}/openvino_genai${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 }
 
+if [[ "${1:-}" == "--clean" ]]; then
+    if (( $# != 1 )); then
+        echo "--clean does not accept additional arguments" >&2
+        exit 2
+    fi
+    clean_generated_artifacts
+    exit
+fi
+
 if [[ "${1:-}" == "--quick" ]]; then
     shift
     activate_venv
@@ -170,4 +205,5 @@ bash "${script_dir}/benchmark_app.sh"
 
 "${python_bin}" "${script_dir}/python/e2e_performance_measurement.py" \
     --frameworks decode_only optimum genai \
-    --torch-threads 20
+    --torch-threads 20 \
+    --tokens 5000
