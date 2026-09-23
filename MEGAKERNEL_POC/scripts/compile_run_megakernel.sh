@@ -7,7 +7,7 @@ repo_root="$(cd "${megakernel_root}/.." && pwd)"
 build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
 setup_state_dir="${build_dir}/megakernel_setup"
-genai_dir="${megakernel_root}/openvino.genai"
+genai_dir="${build_dir}/openvino.genai"
 model_dir="${megakernel_root}/python/qwen3-0.6b-openvino-ir"
 python_bin="${venv_dir}/bin/python"
 build_jobs="${MEGAKERNEL_BUILD_JOBS:-16}"
@@ -239,6 +239,6 @@ set_runtime_environment
 
 bash "${script_dir}/benchmark_app.sh"
 
-"${python_bin}" "${script_dir}/python/e2e_performance_measurement.py" \
+"${python_bin}" "${megakernel_root}/python/e2e_performance_measurement.py" \
     --frameworks decode_only optimum genai \
     --torch-threads 20 
