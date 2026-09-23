@@ -2,12 +2,13 @@
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+megakernel_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${megakernel_root}/.." && pwd)"
 build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
 setup_state_dir="${build_dir}/megakernel_setup"
-genai_dir="${script_dir}/openvino.genai"
-model_dir="${script_dir}/python/qwen3-0.6b-openvino-ir"
+genai_dir="${megakernel_root}/openvino.genai"
+model_dir="${megakernel_root}/python/qwen3-0.6b-openvino-ir"
 python_bin="${venv_dir}/bin/python"
 build_jobs="${MEGAKERNEL_BUILD_JOBS:-16}"
 openvino_version="2026.3.0"
@@ -141,7 +142,7 @@ generate_model() {
     if [[ ! -f "${model_dir}/openvino_model.xml" ]]; then
         local overwrite=()
         [[ -d "${model_dir}" ]] && overwrite=(--overwrite)
-        "${python_bin}" "${script_dir}/python/convert_to_openvino_ir.py" \
+        "${python_bin}" "${megakernel_root}/python/convert_to_openvino_ir.py" \
             --output-dir "${model_dir}" "${overwrite[@]}"
     fi
 
@@ -194,7 +195,7 @@ assert Path(openvino.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolv
     "Quick mode requires local-build Python bindings; refusing to benchmark the installed wheel"
 PY
     timeout --signal=TERM --kill-after=10s "${quick_timeout}" \
-        "${python_bin}" "${script_dir}/python/e2e_performance_measurement.py" \
+        "${python_bin}" "${megakernel_root}/python/e2e_performance_measurement.py" \
         --frameworks genai --tokens 8 --gen-warmup 1 --gen-iters 2 \
         --torch-threads 20 "$@"
     exit

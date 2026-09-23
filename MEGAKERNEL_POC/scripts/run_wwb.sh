@@ -2,15 +2,16 @@
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
-build_dir="${BUILD_DIR:-$(cd "${repo_root}/.." && pwd)/build}"
+megakernel_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${megakernel_root}/.." && pwd)"
+build_dir="${BUILD_DIR:-${repo_root}/build}"
 venv_dir="${VENV_DIR:-}"
 python_bin="${PYTHON_BIN:-python3}"
-wwb_dir="${repo_root}/openvino.genai/tools/who_what_benchmark"
+wwb_dir="${megakernel_root}/openvino.genai/tools/who_what_benchmark"
 
 model_id="${MODEL_ID:-Qwen/Qwen3-0.6B}"
-target_model="${TARGET_MODEL:-${script_dir}/python/qwen3-0.6b-openvino-ir}"
-results_dir="${RESULTS_DIR:-${script_dir}/wwb_results}"
+target_model="${TARGET_MODEL:-${megakernel_root}/python/qwen3-0.6b-openvino-ir}"
+results_dir="${RESULTS_DIR:-${megakernel_root}/wwb_results}"
 gt_data="${GT_DATA:-${results_dir}/qwen3-0.6b-gt.csv}"
 num_samples="${NUM_SAMPLES:-10}"
 max_new_tokens="${MAX_NEW_TOKENS:-128}"
@@ -75,7 +76,7 @@ if [[ -n "${venv_dir}" ]]; then
 fi
 if [[ ! -d "${target_model}" ]]; then
     echo "Missing converted model: ${target_model}" >&2
-    echo "Build it with ${script_dir}/python/convert_to_openvino_ir.py" >&2
+    echo "Build it with ${megakernel_root}/python/convert_to_openvino_ir.py" >&2
     exit 1
 fi
 
@@ -86,13 +87,13 @@ unset OV_MEGAKERNEL_DISABLE
 
 if [[ ! -d "${build_dir}/wheels" ]]; then
     echo "Missing local wheel directory: ${build_dir}/wheels" >&2
-    echo "Build the branch first: bash ${repo_root}/compile_run_megakernel.sh" >&2
+    echo "Build the branch first: bash ${script_dir}/compile_run_megakernel.sh" >&2
     exit 1
 fi
 mapfile -t local_wheels < <(find "${build_dir}/wheels" -maxdepth 1 -name '*.whl' -type f -print | sort)
 if [[ ${#local_wheels[@]} -eq 0 ]]; then
     echo "No locally built wheels found in ${build_dir}/wheels" >&2
-    echo "Build the branch first: bash ${repo_root}/compile_run_megakernel.sh" >&2
+    echo "Build the branch first: bash ${script_dir}/compile_run_megakernel.sh" >&2
     exit 1
 fi
 
