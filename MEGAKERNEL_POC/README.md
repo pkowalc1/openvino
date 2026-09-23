@@ -39,7 +39,7 @@ We aim for a similar speedup.
 
 **4. How to build**
 
-For local build, use ./MEGAKERNEL_POC/compile_run_megakernel.sh. This will install all needed deps, build and run e2e benchmarks locally.
+For a local build, use `./MEGAKERNEL_POC/compile_run_megakernel.sh`. The first run installs the required dependencies; later runs reuse them and only rebuild, reinstall the generated wheel, and run the benchmarks. Use `./MEGAKERNEL_POC/compile_run_megakernel.sh --clean` to remove generated artifacts and cached setup state before a clean build.
 
 **5. Code structure**
 

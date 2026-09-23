@@ -5,12 +5,23 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
+setup_state_dir="${build_dir}/megakernel_setup"
 genai_dir="${script_dir}/openvino.genai"
 model_dir="${script_dir}/python/qwen3-0.6b-openvino-ir"
 python_bin="${venv_dir}/bin/python"
 build_jobs="${MEGAKERNEL_BUILD_JOBS:-16}"
 openvino_version="2026.3.0"
 tokenizers_version="2026.3.0.0"
+
+fingerprint_inputs() {
+    sha256sum "$@" | sha256sum | cut -d ' ' -f 1
+}
+
+stamp_matches() {
+    local stamp_file="$1"
+    local expected="$2"
+    [[ -f "${stamp_file}" ]] && [[ "$(<"${stamp_file}")" == "${expected}" ]]
+}
 
 clean_generated_artifacts() {
     local artifact
@@ -48,19 +59,40 @@ activate_venv() {
 }
 
 install_system_dependencies() {
-    if [[ "${MEGAKERNEL_SKIP_SYSTEM_DEPS:-0}" != "1" ]]; then
-        if (( EUID == 0 )); then
-            bash "${repo_root}/install_build_dependencies.sh"
-        elif command -v sudo >/dev/null; then
-            sudo -E bash "${repo_root}/install_build_dependencies.sh"
-        else
-            echo "System build dependencies require root. Re-run as root or install them manually." >&2
-            exit 1
-        fi
+    local stamp_file="${setup_state_dir}/system-dependencies.sha256"
+    local fingerprint
+    fingerprint="$(fingerprint_inputs "${repo_root}/install_build_dependencies.sh")"
+    if stamp_matches "${stamp_file}" "${fingerprint}"; then
+        echo "System build dependencies are already installed"
+        return
     fi
+
+    if (( EUID == 0 )); then
+        bash "${repo_root}/install_build_dependencies.sh"
+    elif command -v sudo >/dev/null; then
+        sudo -E bash "${repo_root}/install_build_dependencies.sh"
+    else
+        echo "System build dependencies require root. Re-run as root or install them manually." >&2
+        exit 1
+    fi
+
+    mkdir -p "${setup_state_dir}"
+    printf '%s\n' "${fingerprint}" > "${stamp_file}"
 }
 
 install_python_dependencies() {
+    local stamp_file="${setup_state_dir}/python-dependencies.sha256"
+    local fingerprint
+    fingerprint="$({
+        fingerprint_inputs "${genai_dir}/requirements-build.txt"
+        printf '%s\n' "${openvino_version}" "${tokenizers_version}" "optimum-intel[openvino]" "accelerate"
+    } | sha256sum | cut -d ' ' -f 1)"
+    if stamp_matches "${stamp_file}" "${fingerprint}" &&
+       "${python_bin}" -c "import accelerate, openvino, openvino_tokenizers, optimum, transformers"; then
+        echo "Python dependencies are already installed"
+        return
+    fi
+
     "${python_bin}" -m pip install --upgrade pip setuptools wheel
     "${python_bin}" -m pip install --upgrade \
         -r "${genai_dir}/requirements-build.txt" \
@@ -70,6 +102,9 @@ install_python_dependencies() {
         "openvino==${openvino_version}" \
         "openvino-tokenizers==${tokenizers_version}" \
         --force-reinstall --no-deps
+
+    mkdir -p "${setup_state_dir}"
+    printf '%s\n' "${fingerprint}" > "${stamp_file}"
 }
 
 download_genai() {
@@ -205,5 +240,4 @@ bash "${script_dir}/benchmark_app.sh"
 
 "${python_bin}" "${script_dir}/python/e2e_performance_measurement.py" \
     --frameworks decode_only optimum genai \
-    --torch-threads 20 \
-    --tokens 5000
+    --torch-threads 20 
