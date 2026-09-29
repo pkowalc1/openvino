@@ -45,7 +45,7 @@ TEST_F(MemoryBandwidthTest, DISABLED_MaxGpuBandwidthB60GPU_occupancy50Percent) {
       queue(), warmupIterations, benchmarkIterations);
 
   const double transferredBytes =
-      static_cast<double>(bufferSizeBytes + blocks * vectorSizeBytes);
+      static_cast<double>(bufferSizeBytes + globalWorkSize * vectorSizeBytes);
   const double bandwidthGBs = transferredBytes / (profile.averageUs * 1000.0);
   std::cout << std::fixed << std::setprecision(2)
             << "GPU memory bandwidth: " << bandwidthGBs << " GB/s"
