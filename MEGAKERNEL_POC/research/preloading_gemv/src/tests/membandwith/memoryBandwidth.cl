@@ -7,5 +7,6 @@ __attribute__((intel_reqd_sub_group_size(32))) __kernel void memory_bandwidth(
   for (size_t i = index; i < vector_count; i += total_work_items) {
     acc += data[i] * (uint4)(1664525u) + (uint4)(1013904223u);
   }
+  // I want to write much less data than I read, to measure only read bandwidth.
   data[index] = acc;
 }
