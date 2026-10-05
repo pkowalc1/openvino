@@ -26,22 +26,18 @@ template <typename ShapeType>
 std::vector<layout> megakernel_inst::calc_output_layouts(megakernel_node const& /*node*/,
                                                                  const kernel_impl_params& impl_param) {
     auto desc = impl_param.typed_desc<megakernel>();
+    const auto& in_layout = impl_param.get_input_layout(0);
 
-    const auto& hs_layout   = impl_param.get_input_layout(0);  // hidden_states
+    auto ps = ov::intel_gpu::op::megakernel_output_shape(
+        in_layout.get<ShapeType>(),
+        impl_param.input_layouts.size() > 1 ? impl_param.get_input_layout(1).get<ShapeType>() : ShapeType{},
+        desc->hidden_size, desc->num_heads, desc->head_dim);
 
-    const auto out0_dt = data_types::f32;   // hidden_states_out
-    const auto fmt    = format::bfyx;   // 4D format for 3D hidden_states_out
-
-    // Derive B, S from hidden_states
-    const auto& hs_ps = hs_layout.get<ShapeType>();
-    ShapeType B_dim   = hs_ps.rank().is_static() ? ShapeType{hs_ps[0]} : ShapeType{ov::Dimension::dynamic()};
-    ShapeType S_dim   = hs_ps.rank().is_static() ? ShapeType{hs_ps[1]} : ShapeType{ov::Dimension::dynamic()};
-
-    const int64_t H  = desc->hidden_size;
-
-    // Single output: hidden_states_out [B, S, H]. KV cache is internal to the impl.
+    auto dt = data_types::f32;
+    if (!desc->output_data_types.empty() && desc->output_data_types[0].has_value())
+        dt = desc->output_data_types[0].value();
     std::vector<layout> outs;
-    outs.emplace_back(ShapeType{B_dim[0], S_dim[0], ov::Dimension(H)}, out0_dt, fmt);
+    outs.emplace_back(ps, dt, in_layout.format);
     return outs;
 }
 

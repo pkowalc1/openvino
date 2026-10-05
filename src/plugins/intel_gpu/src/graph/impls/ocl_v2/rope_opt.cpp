@@ -48,6 +48,13 @@ size_t get_vec_size(const RuntimeParams& params) {
     return vec_size;
 }
 
+// Only the rotate-half kernel writes its output in the transposed layout itself;
+// for every other variant output_trans0213 is handled elsewhere (or rejected).
+bool writes_transposed_output(const RoPE::Config& config) {
+    return config.output_trans0213 && !config.is_interleaved && !config.is_qwen && !config.is_chatglm &&
+           !config.is_ltx_video;
+}
+
 class RopeGenerator : public KernelGenerator {
 public:
     RopeGenerator() : KernelGenerator("rope_opt") {}
@@ -80,6 +87,9 @@ protected:
 
         if (desc->config.input_trans0213) {
             jit.make("ENABLE_TRANSPOSE", true);
+        }
+        if (writes_transposed_output(desc->config)) {
+            jit.make("ENABLE_OUTPUT_TRANSPOSE", true);
         }
 
         if (!desc->config.is_chatglm && (params.input_layouts[1].data_padding.is_dynamic() || params.input_layouts[2].data_padding.is_dynamic())) {
@@ -170,9 +180,13 @@ protected:
                     auto f = extract_channel(ChannelName::FEATURE, in_l);
                     wgs.global = {b, f, cfg.rotary_ndims / 2ul / vec_size};
                 } else {
-                    auto b = extract_channel(ChannelName::BATCH, out_l);
-                    auto f = extract_channel(ChannelName::FEATURE, out_l);
-                    auto y = extract_channel(ChannelName::Y, out_l);
+                    // Work items are indexed in the INPUT's [batch, seq, head]
+                    // order; with output_trans0213 the output dims are swapped,
+                    // so the grid must come from the input layout.
+                    const auto& grid_l = writes_transposed_output(cfg) ? in_l : out_l;
+                    auto b = extract_channel(ChannelName::BATCH, grid_l);
+                    auto f = extract_channel(ChannelName::FEATURE, grid_l);
+                    auto y = extract_channel(ChannelName::Y, grid_l);
                     wgs.global = {b, f, y * cfg.rotary_ndims / 2ul / vec_size};
                     if (cfg.support_3d_rope) {
                         wgs.global = {b, f, cfg.rotary_ndims / 2ul / vec_size};

@@ -20,28 +20,19 @@ bool MegaKernel::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("head_dim",            m_attrs.head_dim);
     visitor.on_attribute("intermediate_size",   m_attrs.intermediate_size);
     visitor.on_attribute("rms_norm_eps",        m_attrs.rms_norm_eps);
+    visitor.on_attribute("kind",                m_attrs.kind);
+    visitor.on_attribute("out_type",            m_attrs.out_type);
     return true;
 }
 
 void MegaKernel::validate_and_infer_types() {
-    // Port 0: hidden_states [B, S, hidden_size]
-    const auto& hs_ps   = get_input_partial_shape(0);
-
-    const int64_t H = m_attrs.hidden_size;
-
-    ov::Dimension B = ov::Dimension::dynamic();
-    ov::Dimension S = ov::Dimension::dynamic();
-
-    if (hs_ps.rank().is_static()) {
-        if (hs_ps.rank().get_length() >= 1) B = hs_ps[0];
-        if (hs_ps.rank().get_length() >= 2) S = hs_ps[1];
-    }
-
-    const auto out_et = ov::element::f32;
-    // Single output: hidden_states_out [B, S, hidden_size] (f32, matches model.norm).
-    // The KV cache is kept entirely inside the plugin impl (MegaKernelFastImpl), so
-    // the op exposes no KV outputs and the pass drops the KV-cache Assign sinks.
-    set_output_type(0, out_et, ov::PartialShape{B, S, H});
+    // Shape follows port 0 with the last dimension replaced by hidden_size, so the
+    // same op covers a shape-preserving decoder block and a projection such as
+    // lm_head that widens the trailing dimension.
+    auto ps = megakernel_output_shape(get_input_partial_shape(0),
+                                      get_input_size() > 1 ? get_input_partial_shape(1) : ov::PartialShape{},
+                                      m_attrs.hidden_size, m_attrs.num_attention_heads, m_attrs.head_dim);
+    set_output_type(0, m_attrs.out_type, ps);
 }
 
 std::shared_ptr<ov::Node> MegaKernel::clone_with_new_inputs(const ov::OutputVector& new_args) const {
