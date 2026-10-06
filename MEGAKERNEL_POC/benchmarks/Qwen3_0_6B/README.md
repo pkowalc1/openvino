@@ -10,10 +10,10 @@ does not compare against a reference model or test numerical correctness.
 Run from the repository root:
 
 ```sh
-MEGAKERNEL_POC/benchmarks/bench2/run.sh --device=0 --iterations=200
+MEGAKERNEL_POC/benchmarks/Qwen3_0_6B/run.sh --device=0 --iterations=200
 ```
 
-The runner builds in `bench2/build` (override with `BUILD_DIR`, `JOBS`, or
+The runner builds in `Qwen3_0_6B/build` (override with `BUILD_DIR`, `JOBS`, or
 `CMAKE_BUILD_TYPE`). Options: `--device=<index|name substring>` (first OpenCL
 GPU by default), `--list-devices`, `--context-tokens=N` (default 4000),
 `--iterations=N` (default 100), `--warmup=N` (default 5), `--seed=N`
@@ -22,7 +22,7 @@ GPU by default), `--list-devices`, `--context-tokens=N` (default 4000),
 Select the megakernel at CMake configure time (default: `Qwen06BPOC`):
 
 ```sh
-cmake -S MEGAKERNEL_POC/benchmarks/bench2 -B /tmp/qwen06b-bench2-build \
+cmake -S MEGAKERNEL_POC/benchmarks/Qwen3_0_6B -B /tmp/qwen06b-bench2-build \
   -DMEGAKERNEL_IMPLEMENTATION=Qwen06BPOC_prefill_megakernel
 cmake --build /tmp/qwen06b-bench2-build -j8
 /tmp/qwen06b-bench2-build/qwen06b_random_decode_benchmark --context-tokens=128
@@ -37,3 +37,5 @@ single-token decode calls, excluding setup and transfers. Minimum transfer
 counts weights once, previous K/V reads once, new K/V writes once, and decode
 input, position and output bytes. Effective bandwidth divides that lower bound
 by average GPU latency (decimal GB/s); it does not measure actual memory traffic.
+For the Arc Pro B60, SOL Memory reports effective bandwidth as a percentage of
+its 456 GB/s peak bandwidth, using the same minimum-transfer estimate.

@@ -260,11 +260,17 @@ TEST(Qwen06BDecode, RandomDecodeLatencyAndBandwidth) {
     const size_t minimum_bytes = weight_bytes + (static_cast<size_t>(decode_position) + 1) * kv_bytes_per_token +
                                  decode_hidden.size() * fixture::fp16 + sizeof(decode_position) +
                                  decode_hidden.size() * sizeof(float);
+    const double effective_bandwidth = static_cast<double>(minimum_bytes) * options.iterations / gpu_ns;
     std::cout << "Qwen06BPOC random decode GPU time: avg=" << gpu_ns / 1e6 / options.iterations
               << " ms over " << options.iterations << " iterations (total " << gpu_ns / 1e6 << " ms, "
               << options.warmup << " warmup)\n";
     std::cout << "Minimum decode transfer: " << minimum_bytes / 1e6 << " MB; effective bandwidth: "
-              << static_cast<double>(minimum_bytes) * options.iterations / gpu_ns << " GB/s\n";
+              << effective_bandwidth << " GB/s\n";
+    if (gpu->name.find("Arc(TM) Pro B60") != std::string::npos) {
+        constexpr double b60_peak_bandwidth = 456.0;
+        std::cout << "SOL Memory: " << 100.0 * effective_bandwidth / b60_peak_bandwidth
+                  << "% of B60 peak (" << b60_peak_bandwidth << " GB/s)\n";
+    }
 }
 }  // namespace
 
