@@ -36,6 +36,9 @@ public:
     void parallel_for(int n, const std::function<void(int, int)>& fn) override {
         m_cpu_parallel.parallel_simple(n, fn);
     }
+    // get_flags() is SYNCHRONOUS (0), so parallel_for() already blocks until
+    // all closures finish -> wait() has nothing left to do (see dnnl_threadpool_iface.hpp).
+    void wait() override {}
 
 private:
     const CpuParallel& m_cpu_parallel;

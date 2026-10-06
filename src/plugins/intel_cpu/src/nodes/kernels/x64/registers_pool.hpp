@@ -89,6 +89,12 @@ public:
             lhs.ensureValid();
             return lhs.operator Xbyak::RegExp() + rhs;
         }
+        // Disambiguates `Reg + size_t`: newer Xbyak adds operator+(size_t) on both
+        // TReg and RegExp, so relying on Reg's implicit conversions is ambiguous.
+        friend Xbyak::RegExp operator+(const Reg& lhs, size_t rhs) {
+            lhs.ensureValid();
+            return lhs.operator Xbyak::RegExp() + rhs;
+        }
         void release() {
             if (auto pool = regPool.lock()) {
                 pool->returnToPool(reg);
