@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -49,6 +50,8 @@ constexpr std::array<Weight, 12> weights{{
 struct Options {
     std::string device;
     int context_tokens = 4000;
+    int prefill_iterations = 5;
+    int prefill_warmup = 1;
     int warmup = 5;
     int iterations = 100;
     uint32_t seed = 42;
@@ -190,6 +193,22 @@ cl_ulong profiling_ns(cl_event event, cl_profiling_info info) {
     return value;
 }
 
+void print_phase(const char* name, cl_ulong gpu_ns, size_t minimum_bytes, int iterations, int warmup, bool is_b60) {
+    const double bandwidth = static_cast<double>(minimum_bytes) * iterations / gpu_ns;
+    std::cout << std::fixed << std::setprecision(2)
+              << "\n" << name << " (" << iterations << " measured, " << warmup << " warmup)\n"
+              << "  Latency:        " << gpu_ns / 1e6 / iterations << " ms\n"
+              << "  Min transfer:   " << minimum_bytes / 1e6 << " MB\n"
+              << "  Mem bandwidth:  " << bandwidth << " GB/s\n"
+              << "  SOL Memory:     ";
+    if (is_b60) {
+        constexpr double b60_peak_bandwidth = 456.0;
+        std::cout << 100.0 * bandwidth / b60_peak_bandwidth << "% (B60 peak: " << b60_peak_bandwidth << " GB/s)\n";
+    } else {
+        std::cout << "N/A (B60 only)\n";
+    }
+}
+
 void expect_finite_output(Device& device, const void* buffer, size_t bytes) {
     std::vector<float> output(bytes / sizeof(float));
     check(device.copy(device.queue, CL_TRUE, output.data(), buffer, bytes, 0, nullptr, nullptr));
@@ -197,7 +216,7 @@ void expect_finite_output(Device& device, const void* buffer, size_t bytes) {
         ASSERT_TRUE(std::isfinite(output[index])) << "Non-finite output at element " << index;
 }
 
-TEST(Qwen06BDecode, RandomDecodeLatencyAndBandwidth) {
+TEST(Qwen06B, RandomPrefillAndDecodeLatencyAndBandwidth) {
     const auto gpus = enumerate_gpus();
     if (gpus.empty()) GTEST_SKIP() << "No OpenCL GPU available";
     const GpuEntry* gpu = options.device.empty() ? &gpus.front() : select_gpu(gpus, options.device);
@@ -234,6 +253,25 @@ TEST(Qwen06BDecode, RandomDecodeLatencyAndBandwidth) {
     check(clFinish(device.queue));
     expect_finite_output(device, context.hidden_states_out, context_hidden.size() * sizeof(float));
 
+    for (int index = 0; index < options.prefill_warmup; ++index) ASSERT_EQ(runtime->Execute(&context), 0);
+    check(clFinish(device.queue));
+    cl_event prefill_begin = nullptr;
+    cl_event prefill_end = nullptr;
+    check(clEnqueueMarkerWithWaitList(device.queue, 0, nullptr, &prefill_begin));
+    for (int index = 0; index < options.prefill_iterations; ++index) ASSERT_EQ(runtime->Execute(&context), 0);
+    check(clEnqueueMarkerWithWaitList(device.queue, 0, nullptr, &prefill_end));
+    check(clFinish(device.queue));
+    const cl_ulong prefill_ns = profiling_ns(prefill_end, CL_PROFILING_COMMAND_START) -
+                                profiling_ns(prefill_begin, CL_PROFILING_COMMAND_END);
+    check(clReleaseEvent(prefill_begin));
+    check(clReleaseEvent(prefill_end));
+    expect_finite_output(device, context.hidden_states_out, context_hidden.size() * sizeof(float));
+
+    constexpr size_t kv_bytes_per_token = fixture::layers * 2 * 8 * 128 * fixture::fp16;
+    const size_t prefill_bytes = weight_bytes + static_cast<size_t>(options.context_tokens) * kv_bytes_per_token +
+                                 context_hidden.size() * fixture::fp16 + sizeof(context_position) +
+                                 context_hidden.size() * sizeof(float);
+
     const auto decode_hidden = random_half(fixture::hidden, rng);
     const int64_t decode_position = options.context_tokens;
     mk::Qwen06BRuntimeParams decode{};
@@ -256,21 +294,12 @@ TEST(Qwen06BDecode, RandomDecodeLatencyAndBandwidth) {
     check(clReleaseEvent(end));
     expect_finite_output(device, decode.hidden_states_out, decode_hidden.size() * sizeof(float));
 
-    constexpr size_t kv_bytes_per_token = fixture::layers * 2 * 8 * 128 * fixture::fp16;
     const size_t minimum_bytes = weight_bytes + (static_cast<size_t>(decode_position) + 1) * kv_bytes_per_token +
                                  decode_hidden.size() * fixture::fp16 + sizeof(decode_position) +
                                  decode_hidden.size() * sizeof(float);
-    const double effective_bandwidth = static_cast<double>(minimum_bytes) * options.iterations / gpu_ns;
-    std::cout << "Qwen06BPOC random decode GPU time: avg=" << gpu_ns / 1e6 / options.iterations
-              << " ms over " << options.iterations << " iterations (total " << gpu_ns / 1e6 << " ms, "
-              << options.warmup << " warmup)\n";
-    std::cout << "Minimum decode transfer: " << minimum_bytes / 1e6 << " MB; effective bandwidth: "
-              << effective_bandwidth << " GB/s\n";
-    if (gpu->name.find("Arc(TM) Pro B60") != std::string::npos) {
-        constexpr double b60_peak_bandwidth = 456.0;
-        std::cout << "SOL Memory: " << 100.0 * effective_bandwidth / b60_peak_bandwidth
-                  << "% of B60 peak (" << b60_peak_bandwidth << " GB/s)\n";
-    }
+    const bool is_b60 = gpu->name.find("Arc(TM) Pro B60") != std::string::npos;
+    print_phase("Prefill", prefill_ns, prefill_bytes, options.prefill_iterations, options.prefill_warmup, is_b60);
+    print_phase("Decode", gpu_ns, minimum_bytes, options.iterations, options.warmup, is_b60);
 }
 }  // namespace
 
@@ -284,13 +313,16 @@ int main(int argc, char** argv) {
         };
         if (const char* v = value("--device")) options.device = v;
         else if (const char* v = value("--context-tokens")) options.context_tokens = std::stoi(v);
+        else if (const char* v = value("--prefill-iterations")) options.prefill_iterations = std::stoi(v);
+        else if (const char* v = value("--prefill-warmup")) options.prefill_warmup = std::stoi(v);
         else if (const char* v = value("--iterations")) options.iterations = std::stoi(v);
         else if (const char* v = value("--warmup")) options.warmup = std::stoi(v);
         else if (const char* v = value("--seed")) options.seed = static_cast<uint32_t>(std::stoul(v));
         else if (arg == "--list-devices") options.list_devices = true;
         else {
             std::cerr << "Unknown argument: " << arg << "\nUsage: qwen06b_random_decode_benchmark "
-                         "[--device=<index|name>] [--context-tokens=N] [--iterations=N] "
+                         "[--device=<index|name>] [--context-tokens=N] [--prefill-iterations=N] "
+                         "[--prefill-warmup=N] [--iterations=N] "
                          "[--warmup=N] [--seed=N] [--list-devices] [gtest flags]\n";
             return 2;
         }
@@ -299,8 +331,10 @@ int main(int argc, char** argv) {
         print_gpus(enumerate_gpus());
         return 0;
     }
-    if (options.iterations <= 0 || options.warmup < 0 || options.context_tokens <= 0 || options.context_tokens >= 4096) {
-        std::cerr << "--iterations and --context-tokens must be > 0, --warmup >= 0, --context-tokens < 4096\n";
+    if (options.iterations <= 0 || options.warmup < 0 || options.prefill_iterations <= 0 ||
+        options.prefill_warmup < 0 || options.context_tokens < 2 || options.context_tokens >= 4096) {
+        std::cerr << "--iterations and --prefill-iterations must be > 0; --warmup and --prefill-warmup >= 0; "
+                     "--context-tokens must be between 2 and 4095\n";
         return 2;
     }
     return RUN_ALL_TESTS();
