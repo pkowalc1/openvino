@@ -2,15 +2,18 @@
 
 #include <CL/cl_ext.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "gemma4FfnKernels.h"
+#include "gemma4PrefillKernels.h"
 
 namespace mk {
 namespace {
@@ -90,8 +93,10 @@ void lm_head_gemv(__global const half* x,
 }
 )CLC";
 
-cl_program build(cl_context ctx, cl_device_id dev, const char* src, const char* opts, cl_int* err) {
-    cl_program prog = clCreateProgramWithSource(ctx, 1, &src, nullptr, err);
+cl_program build_sources(cl_context ctx, cl_device_id dev, std::initializer_list<const char*> srcs, const char* opts,
+                         cl_int* err) {
+    std::vector<const char*> v(srcs);
+    cl_program prog = clCreateProgramWithSource(ctx, static_cast<cl_uint>(v.size()), v.data(), nullptr, err);
     if (*err != CL_SUCCESS)
         return nullptr;
     *err = clBuildProgram(prog, 1, &dev, opts, nullptr, nullptr);
@@ -108,12 +113,17 @@ cl_program build(cl_context ctx, cl_device_id dev, const char* src, const char* 
     return prog;
 }
 
-// All 30 kFfn instances share one program per context.
-cl_program ffn_program(cl_context ctx, cl_device_id dev, cl_int* err) {
+cl_program build(cl_context ctx, cl_device_id dev, const char* src, const char* opts, cl_int* err) {
+    return build_sources(ctx, dev, {src}, opts, err);
+}
+
+// All 30 kFfn instances share one program per context; pf_mb > 0 selects the
+// prefill program built with that GEMM tile height.
+cl_program ffn_program(cl_context ctx, cl_device_id dev, cl_int* err, int pf_mb = 0) {
     static std::mutex mu;
-    static std::map<cl_context, cl_program> cache;
+    static std::map<std::pair<cl_context, int>, cl_program> cache;
     std::lock_guard<std::mutex> g(mu);
-    auto it = cache.find(ctx);
+    auto it = cache.find({ctx, pf_mb});
     if (it != cache.end()) {
         *err = CL_SUCCESS;
         return it->second;
@@ -123,10 +133,64 @@ cl_program ffn_program(cl_context ctx, cl_device_id dev, cl_int* err) {
     const char* extra = std::getenv("OV_MEGAKERNEL_CL_OPTS");
     std::snprintf(opts, sizeof(opts), "-DH_=%d -DI_=%d -DIE_=%d -DE_=%d -DTOPK_=%d -DEPS_=1e-6f %s %s",
                   kHidden, kInter, kExpertInter, kExperts, kTopK, kFfnBuildOpts, extra ? extra : "");
-    cl_program p = build(ctx, dev, kFfnSource, opts, err);
+    std::string o = opts;
+    if (pf_mb)
+        o += " -DPF_MB=" + std::to_string(pf_mb) + " -DPF_NSG=" + std::to_string(kPfNsg) + " " + kPrefillBuildOpts;
+    cl_program p = pf_mb ? build_sources(ctx, dev, {kFfnSource, kPrefillSource}, o.c_str(), err)
+                         : build(ctx, dev, kFfnSource, o.c_str(), err);
     if (p)
-        cache.emplace(ctx, p);
+        cache.emplace(std::make_pair(ctx, pf_mb), p);
     return p;
+}
+
+// Multi-token intermediates, shared by every MegaKernel of a context: the
+// layers run one after another on the same in-order queue.
+enum PfBuf {
+    kPfAT,    // tiled f16 GEMM input (q|k|v or o_proj)
+    kPfRaw,   // f32 [T, R] q|k|v projections
+    kPfO,     // f32 [T, H] o_proj
+    kPfH1,    // f32 [T, H]
+    kPfXD,    // tiled f16 [T, H] dense MLP input
+    kPfXR,    // tiled f16 [T, H] router input
+    kPfX2,    // f16 [T, H] MoE input
+    kPfLog,   // f32 [KS, T, E] router partials
+    kPfTkI,   // i32 [T, TOPK]
+    kPfTkW,   // f32 [T, TOPK]
+    kPfAct,   // tiled f16 [T, I]
+    kPfMD,    // f32 [T, H] dense MLP output
+    kPfHdr,   // i32 [1] MoE tile count
+    kPfTExp,  // i32 [tiles]
+    kPfPair,  // i32 [tiles * MT]
+    kPfXE,    // tiled f16 [tiles * MT, H]
+    kPfAE,    // tiled f16 [tiles * MT, IE]
+    kPfYS,    // f16 [T * TOPK, H] weighted expert outputs
+    kPfBufs
+};
+struct PfScratch {
+    void* buf[kPfBufs] = {};
+    size_t cap[kPfBufs] = {};
+    int refs = 0;
+};
+std::mutex g_pf_mu;
+std::map<cl_context, PfScratch> g_pf;
+
+enum PfKernel { kPfAttnRms, kPfGemm, kPfTile, kPfFfnIn, kPfGemmF16w, kPfTopk, kPfGemmGelu, kPfRoute, kPfMoeDown,
+                kPfFfnOut, kPfGather, kPfKernels };
+const char* const kPfKernelNames[kPfKernels] = {"pf_attn_rms", "pf_gemm",     "pf_tile",      "pf_ffn_in",
+                                                "pf_gemm_f16w", "pf_topk",     "pf_gemm_gelu", "pf_moe_route",
+                                                "pf_gemm_moe_down", "pf_ffn_out", "pf_gather"};
+
+// Calls of at least this many tokens take the batched path (OV_MEGAKERNEL_PF_MIN).
+int prefill_min_tokens() {
+    static const int v = [] {
+        const char* e = std::getenv("OV_MEGAKERNEL_PF_MIN");
+        return e ? std::atoi(e) : 2;
+    }();
+    return v;
+}
+
+size_t round_up(size_t v, size_t m) {
+    return (v + m - 1) / m * m;
 }
 
 // Scratch layout of one kFfn token (floats unless noted).
@@ -239,10 +303,282 @@ TErrorcode Gemma4POCRuntime::InitFfn() {
     for (int port : {kFfnWPostFf1, kFfnWPostFf2, kFfnWPostFf, kFfnLayerScalar})
         setp(kFfn_[kOut], a++, f[port]);
     // arg 7 (out) is per token.
+    return InitPrefill();
+}
+
+TErrorcode Gemma4POCRuntime::InitPrefill() {
+    for (int v = 0; v < 2; ++v) {
+        cl_int err = CL_SUCCESS;
+        cl_program prog = ffn_program(ctx_, dev_, &err, v ? kPfMbSmall : kPfMb);
+        CL_OK(err, "build prefill program");
+        for (int i = 0; i < kPfKernels; ++i) {
+            kPf_[v][i] = clCreateKernel(prog, kPfKernelNames[i], &err);
+            CL_OK(err, kPfKernelNames[i]);
+            if (std::getenv("OV_MEGAKERNEL_DUMP")) {
+                cl_ulong spill = 0;
+                clGetKernelWorkGroupInfo(kPf_[v][i], dev_, 0x4109 /*CL_KERNEL_SPILL_MEM_SIZE_INTEL*/, sizeof(spill),
+                                         &spill, nullptr);
+                std::fprintf(stderr, "[Gemma4] kernel %s/%d spill=%llu\n", kPfKernelNames[i], v,
+                             (unsigned long long)spill);
+            }
+        }
+    }
+    std::lock_guard<std::mutex> g(g_pf_mu);
+    ++g_pf[ctx_].refs;
+    pfShared_ = true;
+    return CL_SUCCESS;
+}
+
+void* Gemma4POCRuntime::pf_buf(int id, size_t bytes) {
+    std::lock_guard<std::mutex> g(g_pf_mu);
+    PfScratch& s = g_pf[ctx_];
+    if (s.cap[id] < bytes) {
+        // Earlier layers of this call may still use the old block.
+        if (s.buf[id])
+            usmBlockingFree_(ctx_, s.buf[id]);
+        cl_int err = CL_SUCCESS;
+        const size_t cap = round_up(bytes + bytes / 4, 4096);
+        s.buf[id] = usmAlloc_(ctx_, dev_, nullptr, cap, 0, &err);
+        s.cap[id] = err == CL_SUCCESS && s.buf[id] ? cap : 0;
+        if (!s.cap[id])
+            s.buf[id] = nullptr;
+    }
+    return s.buf[id];
+}
+
+// Kernel k of the tile variant `v` in scope (0: kPfMb, 1: kPfMbSmall).
+#define PF_ARG(k, i, x) CL_OK(clSetKernelArg(kPf_[v][k], i, sizeof(x), &(x)), kPfKernelNames[k])
+#define PF_PTR(k, i, p) CL_OK(setUsmArg_(kPf_[v][k], i, p), kPfKernelNames[k])
+#define PF_RUN(k, dims, gws, lws) \
+    CL_OK(clEnqueueNDRangeKernel(stream_, kPf_[v][k], dims, nullptr, gws, lws, 0, nullptr, nullptr), kPfKernelNames[k])
+
+// Variant for the dense GEMMs of a T-token call, and for its MoE.
+static int pf_dense_variant(int T) {
+    static const int lim = [] {
+        const char* e = std::getenv("OV_MEGAKERNEL_PF_DENSE_SMALL");
+        return e ? std::atoi(e) : 32;
+    }();
+    return T <= lim ? 1 : 0;
+}
+static int pf_moe_variant(int T) {
+    // Few rows per expert: 8-row tiles waste far less XMX work than 64-row ones.
+    static const int lim = [] {
+        const char* e = std::getenv("OV_MEGAKERNEL_PF_MOE_SMALL");
+        return e ? std::atoi(e) : 256;
+    }();
+    return T <= lim ? 1 : 0;
+}
+static int pf_mt(int v) {
+    return 8 * (v ? kPfMbSmall : kPfMb);
+}
+
+TErrorcode Gemma4POCRuntime::PrefillAttn(const Gemma4RuntimeParams& p) {
+    const int T = p.tokens, R = w_.attn_rows, H = kHidden;
+    const int v = pf_dense_variant(T);
+    const size_t mtiles = (T + pf_mt(v) - 1) / pf_mt(v);
+    void* at = pf_buf(kPfAT, static_cast<size_t>(T) * H * sizeof(uint16_t));
+    void* raw = pf_buf(kPfRaw, static_cast<size_t>(T) * R * sizeof(float));
+    if (!at || !raw)
+        return CL_OUT_OF_RESOURCES;
+    void* const* a = w_.attn;
+
+    PF_PTR(kPfAttnRms, 0, p.in);
+    PF_PTR(kPfAttnRms, 1, a[kAttnWIn]);
+    PF_PTR(kPfAttnRms, 2, at);
+    const size_t rms_gws = kFfnLws * T, lws = kFfnLws;
+    PF_RUN(kPfAttnRms, 1, &rms_gws, &lws);
+
+    const int nrb = R / 16;
+    PF_PTR(kPfGemm, 0, at);
+    PF_ARG(kPfGemm, 1, H);
+    PF_PTR(kPfGemm, 2, a[kAttnQkv]);
+    PF_ARG(kPfGemm, 3, nrb);
+    PF_ARG(kPfGemm, 4, T);
+    PF_PTR(kPfGemm, 5, raw);
+    PF_ARG(kPfGemm, 6, R);
+    const size_t g_gws[2] = {round_up(nrb / 2, kPfNsg) / kPfNsg * kPfLws, mtiles};
+    const size_t g_lws[2] = {kPfLws, 1};
+    PF_RUN(kPfGemm, 2, g_gws, g_lws);
+
+    const int t0 = 0;
+    setUsmArg_(kAttn_[1], 0, raw);
+    setUsmArg_(kAttn_[1], 4, p.in2);
+    setUsmArg_(kAttn_[1], 6, p.out);
+    CL_OK(clSetKernelArg(kAttn_[1], 7, sizeof(int), &t0), "set t0");
+    CL_OK(clSetKernelArg(kAttn_[1], 8, sizeof(int), &p.s), "set S");
+    CL_OK(clSetKernelArg(kAttn_[1], 9, sizeof(int), &R), "set rstride");
+    const size_t post_gws[2] = {attnGws_[1], static_cast<size_t>(T)};
+    const size_t post_lws[2] = {kFfnLws, 1};
+    CL_OK(clEnqueueNDRangeKernel(stream_, kAttn_[1], 2, nullptr, post_gws, post_lws, 0, nullptr, nullptr),
+          "attn_post");
+    return CL_SUCCESS;
+}
+
+TErrorcode Gemma4POCRuntime::PrefillFfn(const Gemma4RuntimeParams& p) {
+    const int T = p.tokens, H = kHidden, KA = p.ka, I = kInter, IE = kExpertInter, E = kExperts;
+    const int dv = pf_dense_variant(T), mv = pf_moe_variant(T);
+    const size_t mtiles = (T + pf_mt(dv) - 1) / pf_mt(dv);
+    const size_t emt = pf_mt(mv);
+    const size_t etiles = (static_cast<size_t>(T) * kTopK + emt - 1) / emt + E;  // bound on MoE tiles
+    const size_t t = T;
+    void* at = pf_buf(kPfAT, t * std::max(KA, H) * 2);
+    void* o = pf_buf(kPfO, t * H * 4);
+    void* h1 = pf_buf(kPfH1, t * H * 4);
+    void* xd = pf_buf(kPfXD, t * H * 2);
+    void* xr = pf_buf(kPfXR, t * H * 2);
+    void* x2 = pf_buf(kPfX2, t * H * 2);
+    void* lg = pf_buf(kPfLog, kPfRouterKs * t * E * 4);
+    void* tki = pf_buf(kPfTkI, t * kTopK * 4);
+    void* tkw = pf_buf(kPfTkW, t * kTopK * 4);
+    void* act = pf_buf(kPfAct, t * I * 2);
+    void* md = pf_buf(kPfMD, t * H * 4);
+    void* hdr = pf_buf(kPfHdr, 64);
+    void* texp = pf_buf(kPfTExp, etiles * 4);
+    void* pair = pf_buf(kPfPair, etiles * emt * 4);
+    void* xe = pf_buf(kPfXE, etiles * emt * H * 2);
+    void* ae = pf_buf(kPfAE, etiles * emt * IE * 2);
+    void* ys = pf_buf(kPfYS, t * kTopK * H * 2);
+    for (void* b : {at, o, h1, xd, xr, x2, lg, tki, tkw, act, md, hdr, texp, pair, xe, ae, ys})
+        if (!b)
+            return CL_OUT_OF_RESOURCES;
+    void* const* f = w_.ffn;
+    void* const null = nullptr;
+    const size_t lws = kFfnLws, tok_gws = kFfnLws * T;
+    const size_t g_lws[2] = {kPfLws, 1};
+    const size_t tile_lws[2] = {16, 16};
+
+    auto gemm = [&](int v, void* a, int K, void* w, int N, void* out) -> TErrorcode {
+        const int nrb = N / 16;
+        PF_PTR(kPfGemm, 0, a);
+        PF_ARG(kPfGemm, 1, K);
+        PF_PTR(kPfGemm, 2, w);
+        PF_ARG(kPfGemm, 3, nrb);
+        PF_ARG(kPfGemm, 4, T);
+        PF_PTR(kPfGemm, 5, out);
+        PF_ARG(kPfGemm, 6, N);
+        const size_t gws[2] = {round_up(nrb / 2, kPfNsg) / kPfNsg * kPfLws, mtiles};
+        PF_RUN(kPfGemm, 2, gws, g_lws);
+        return CL_SUCCESS;
+    };
+    auto gelu = [&](int v, void* a, int K, void* wg, void* wu, int N, void* hd, void* te, size_t tiles,
+                    void* out) -> TErrorcode {
+        const int nrb = N / 16;
+        PF_PTR(kPfGemmGelu, 0, a);
+        PF_ARG(kPfGemmGelu, 1, K);
+        PF_PTR(kPfGemmGelu, 2, wg);
+        PF_PTR(kPfGemmGelu, 3, wu);
+        PF_ARG(kPfGemmGelu, 4, nrb);
+        PF_ARG(kPfGemmGelu, 5, T);
+        PF_PTR(kPfGemmGelu, 6, hd);
+        PF_PTR(kPfGemmGelu, 7, te);
+        PF_PTR(kPfGemmGelu, 8, out);
+        const size_t gws[2] = {round_up(nrb, kPfNsg) / kPfNsg * kPfLws, tiles};
+        PF_RUN(kPfGemmGelu, 2, gws, g_lws);
+        return CL_SUCCESS;
+    };
+    auto tile = [&](int v, void* src, int K, void* out) -> TErrorcode {
+        PF_PTR(kPfTile, 0, src);
+        PF_ARG(kPfTile, 1, K);
+        PF_ARG(kPfTile, 2, T);
+        PF_PTR(kPfTile, 3, out);
+        const size_t gws[2] = {round_up(K / 16, 16), round_up(t, 16)};
+        PF_RUN(kPfTile, 2, gws, tile_lws);
+        return CL_SUCCESS;
+    };
+#define PF_DO(x)                     \
+    do {                             \
+        const TErrorcode e_ = (x);   \
+        if (e_ != CL_SUCCESS)        \
+            return e_;               \
+    } while (0)
+
+    // o = o_proj(attn)
+    PF_DO(tile(dv, p.in, KA, at));
+    PF_DO(gemm(dv, at, KA, f[kFfnOProj], H, o));
+
+    int v = 0;
+    // h1, the three normalised activations
+    {
+        cl_uint a = 0;
+        for (void* x : {o, p.in2, f[kFfnWPostAttn], f[kFfnWPreFf], f[kFfnWRouter], f[kFfnWPreFf2], h1, xd, xr, x2})
+            PF_PTR(kPfFfnIn, a++, x);
+        PF_RUN(kPfFfnIn, 1, &tok_gws, &lws);
+    }
+
+    // router logits (K-split partials), top-k
+    {
+        PF_PTR(kPfGemmF16w, 0, xr);
+        PF_ARG(kPfGemmF16w, 1, H);
+        PF_PTR(kPfGemmF16w, 2, f[kFfnRouterW]);
+        PF_ARG(kPfGemmF16w, 3, E);
+        PF_ARG(kPfGemmF16w, 4, T);
+        PF_PTR(kPfGemmF16w, 5, lg);
+        const size_t gws[2] = {kPfRouterKs * kPfLws, (t + kPfMt - 1) / kPfMt};
+        PF_RUN(kPfGemmF16w, 2, gws, g_lws);
+        const int ks = kPfRouterKs;
+        PF_PTR(kPfTopk, 0, lg);
+        PF_ARG(kPfTopk, 1, T);
+        PF_ARG(kPfTopk, 2, ks);
+        PF_PTR(kPfTopk, 3, tki);
+        PF_PTR(kPfTopk, 4, tkw);
+        const size_t tk_gws = round_up(t, 16) / 16 * kFfnLws;
+        PF_RUN(kPfTopk, 1, &tk_gws, &lws);
+    }
+
+    // dense MLP
+    PF_DO(gelu(dv, xd, H, f[kFfnGate], f[kFfnUp], I, null, null, mtiles, act));
+    PF_DO(gemm(dv, act, I, f[kFfnDown], H, md));
+
+    // MoE: bucket pairs per expert, gather, grouped gate/up, grouped down + scatter
+    v = mv;
+    {
+        PF_PTR(kPfRoute, 0, tki);
+        PF_ARG(kPfRoute, 1, T);
+        PF_PTR(kPfRoute, 2, hdr);
+        PF_PTR(kPfRoute, 3, texp);
+        PF_PTR(kPfRoute, 4, pair);
+        const size_t r_gws = 1024;
+        PF_RUN(kPfRoute, 1, &r_gws, &r_gws);
+    }
+    {
+        PF_PTR(kPfGather, 0, x2);
+        PF_ARG(kPfGather, 1, H);
+        PF_PTR(kPfGather, 2, hdr);
+        PF_PTR(kPfGather, 3, pair);
+        PF_PTR(kPfGather, 4, xe);
+        const size_t lw[2] = {static_cast<size_t>(H) * 2 / 512 * 16, 1};
+        const size_t gws[2] = {lw[0], etiles * emt};
+        PF_RUN(kPfGather, 2, gws, lw);
+    }
+    PF_DO(gelu(mv, xe, H, f[kFfnEGate], f[kFfnEUp], IE, hdr, texp, etiles, ae));
+    {
+        const int nrb = H / 16;
+        cl_uint a = 0;
+        PF_PTR(kPfMoeDown, a++, ae);
+        PF_ARG(kPfMoeDown, a++, IE);
+        PF_PTR(kPfMoeDown, a++, f[kFfnEDown]);
+        PF_ARG(kPfMoeDown, a++, nrb);
+        for (void* x : {hdr, texp, pair, tkw, ys})
+            PF_PTR(kPfMoeDown, a++, x);
+        const size_t gws[2] = {round_up(nrb / 2, kPfNsg) / kPfNsg * kPfLws, etiles};
+        PF_RUN(kPfMoeDown, 2, gws, g_lws);
+    }
+
+    // out
+    v = 0;
+    {
+        cl_uint a = 0;
+        for (void* x : {h1, md, ys, f[kFfnWPostFf1], f[kFfnWPostFf2], f[kFfnWPostFf], f[kFfnLayerScalar], p.out})
+            PF_PTR(kPfFfnOut, a++, x);
+        PF_RUN(kPfFfnOut, 1, &tok_gws, &lws);
+    }
+#undef PF_DO
     return CL_SUCCESS;
 }
 
 TErrorcode Gemma4POCRuntime::ExecuteFfn(const Gemma4RuntimeParams& p) {
+    if (p.tokens >= prefill_min_tokens())
+        return PrefillFfn(p);
     const size_t lws = kFfnLws;
     const size_t row = kHidden * sizeof(uint16_t);
     const size_t attn_row = static_cast<size_t>(p.ka) * sizeof(uint16_t);
@@ -380,15 +716,20 @@ TErrorcode Gemma4POCRuntime::InitAttn() {
     setUsmArg_(kAttn_[1], 2, a[kAttnWK]);
     setUsmArg_(kAttn_[1], 3, a[kAttnMeta]);
     setUsmArg_(kAttn_[1], 5, a[kAttnInvFreq]);
-    return CL_SUCCESS;
+    return InitPrefill();
 }
 
 TErrorcode Gemma4POCRuntime::ExecuteAttn(const Gemma4RuntimeParams& p) {
+    if (p.tokens >= prefill_min_tokens())
+        return PrefillAttn(p);
     const size_t lws = kFfnLws;
     const size_t row = kHidden * sizeof(uint16_t);
+    const int rstride = 0;
+    setUsmArg_(kAttn_[1], 0, scratch_);
     setUsmArg_(kAttn_[1], 4, p.in2);
     setUsmArg_(kAttn_[1], 6, p.out);
     CL_OK(clSetKernelArg(kAttn_[1], 8, sizeof(int), &p.s), "set S");
+    CL_OK(clSetKernelArg(kAttn_[1], 9, sizeof(int), &rstride), "set rstride");
     for (int t = 0; t < p.tokens; ++t) {
         setUsmArg_(kAttn_[0], 0, static_cast<char*>(p.in) + t * row);
         CL_OK(clSetKernelArg(kAttn_[1], 7, sizeof(int), &t), "set token");
@@ -457,6 +798,24 @@ TErrorcode Gemma4POCRuntime::Destroy() {
         if (k)
             clReleaseKernel(k);
         k = nullptr;
+    }
+    for (auto& ks : kPf_) {
+        for (cl_kernel& k : ks) {
+            if (k)
+                clReleaseKernel(k);
+            k = nullptr;
+        }
+    }
+    if (pfShared_) {
+        std::lock_guard<std::mutex> g(g_pf_mu);
+        PfScratch& s = g_pf[ctx_];
+        if (--s.refs == 0) {
+            for (void* b : s.buf)
+                if (b && usmBlockingFree_)
+                    usmBlockingFree_(ctx_, b);
+            g_pf.erase(ctx_);
+        }
+        pfShared_ = false;
     }
     if (prog_) clReleaseProgram(prog_);
     prog_ = nullptr;

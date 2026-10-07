@@ -641,17 +641,22 @@ REQD __kernel void attn_qkv(const __global half* x, const __global half* w_in, c
 // (ints), position rounded to half, table width C}. The RoPE tables are those of
 // the exported rotary_emb: cos/sin(half(pos) * inv_freq[i % (C/2)]) in f32,
 // stored as half. out is head-major [B, HQ+2*HK, S, D]; t = b * S + s.
+// Token t = t0 + get_group_id(1) reads raw + get_group_id(1) * rstride.
 // ---------------------------------------------------------------------------
 #define ATTN_DMAX 512
 REQD __kernel void attn_post(const __global float* raw, const __global half* gq, const __global half* gk,
                              const __global int* meta, const __global int* pos, const __global float* invf,
-                             __global half* out_base, const int t, const int S) {
+                             __global half* out_base, const int t0, const int S, const int rstride) {
     __local float sv[NSG][ATTN_DMAX];
     __local float ctab[ATTN_DMAX], stab[ATTN_DMAX];
+    const int t = t0 + get_group_id(1);
+    raw += (size_t)get_group_id(1) * rstride;
     const int sg = get_sub_group_id();
     const int ln = get_sub_group_local_id();
     const int head = get_group_id(0) * NSG + sg;
     const int HQ = meta[0], HK = meta[1], D = meta[2], RN = meta[3];
+    if (get_group_id(0) * NSG >= HQ + 2 * HK)
+        return;
     {
         const int half_c = meta[9] / 2;
         float p = (float)pos[(size_t)t * meta[7]];

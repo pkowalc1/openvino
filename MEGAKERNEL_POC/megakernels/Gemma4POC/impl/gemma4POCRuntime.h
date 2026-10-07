@@ -14,6 +14,9 @@ namespace mk {
 // (gemma4FfnKernels.h). The OpenCL program is built once per context and shared
 // by all 30 layer instances.
 //
+// kFfn / kAttnIn calls with several tokens (prefill) instead run batched int4
+// XMX GEMMs over all tokens (gemma4PrefillKernels.h).
+//
 // kLmHead (opt-in, measured slower than stock): u8 lm_head GEMV.
 class Gemma4POCRuntime : public IMegakernelRuntime {
 public:
@@ -27,8 +30,12 @@ public:
 private:
     TErrorcode InitFfn();
     TErrorcode ExecuteFfn(const Gemma4RuntimeParams& p);
+    TErrorcode PrefillFfn(const Gemma4RuntimeParams& p);
     TErrorcode InitAttn();
     TErrorcode ExecuteAttn(const Gemma4RuntimeParams& p);
+    TErrorcode PrefillAttn(const Gemma4RuntimeParams& p);
+    TErrorcode InitPrefill();
+    void* pf_buf(int id, size_t bytes);
     TErrorcode InitMask();
     TErrorcode ExecuteMask(const Gemma4RuntimeParams& p);
     TErrorcode InitLmHead();
@@ -49,6 +56,9 @@ private:
     // mask_groups, mask_fill.
     cl_kernel kMask_[2] = {};
     size_t maskGrpCap_ = 0;  // ints in scratch_ for kMaskSliding
+    // Multi-token path (gemma4PrefillKernels.h) per GEMM tile variant, see kPfKernelNames.
+    cl_kernel kPf_[2][11] = {};
+    bool pfShared_ = false;  // holds a reference on the context's prefill scratch
 
     // Resolved against the device's platform; a null platform yields null here.
     clDeviceMemAllocINTEL_fn usmAlloc_ = nullptr;
