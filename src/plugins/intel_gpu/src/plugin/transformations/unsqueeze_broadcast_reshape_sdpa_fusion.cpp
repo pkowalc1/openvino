@@ -229,7 +229,7 @@ UnsqueezeBroadcastReshapeSDPAFusion::UnsqueezeBroadcastReshapeSDPAFusion() {
         auto v_bc = pattern_map.at(broadcast_c_m).get_node_shared_ptr();
 
         OutputVector data_inputs;
-        data_inputs.push_back(pattern_map.at(input_a_m).get_node_shared_ptr());               // Q input
+        data_inputs.push_back(pattern_map.at(input_a_m));               // Q input
         if (pattern_map.count(unsqueeze_b_m) || pattern_map.count(pre_reshape_b_m)) {
             ov::Output<ov::Node> key_input = k_5d->input_value(0);
             auto opt_key_input = ensure_4d(key_input, k_5d, k_bc);

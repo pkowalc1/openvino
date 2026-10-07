@@ -20,7 +20,7 @@ namespace ov::intel_gpu {
 
 static void CreateMegaKernelOp(ProgramBuilder& p,
                                       const std::shared_ptr<ov::intel_gpu::op::MegaKernel>& op) {
-    validate_inputs_count(op, {17});
+    // Input count is defined by the selected megakernel's transformation.
     auto inputs = p.GetInputInfo(op);
     const auto& attrs = op->get_attrs();
 
@@ -39,6 +39,7 @@ static void CreateMegaKernelOp(ProgramBuilder& p,
         attrs.num_attention_heads,
         attrs.intermediate_size,
         attrs.rms_norm_eps);
+    prim.kind = attrs.kind;
 
     prim.output_data_types = get_output_data_types(op);
     p.add_primitive(*op, prim);

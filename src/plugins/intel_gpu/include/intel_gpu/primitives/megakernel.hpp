@@ -38,9 +38,11 @@ struct megakernel : public primitive_base<megakernel> {
     int64_t num_heads   = 16;
     int64_t intermediate_size = 3072;
     float   rms_norm_eps = 1e-6f;
+    int64_t kind = 0;
 
     size_t hash() const override {
         size_t seed = primitive::hash();
+        seed = hash_combine(seed, kind);
         seed = hash_combine(seed, num_layers);
         seed = hash_combine(seed, hidden_size);
         seed = hash_combine(seed, num_kv_heads);
@@ -55,7 +57,8 @@ struct megakernel : public primitive_base<megakernel> {
         if (!compare_common_params(rhs))
             return false;
         auto rhs_c = downcast<const megakernel>(rhs);
-        return num_layers   == rhs_c.num_layers &&
+        return kind == rhs_c.kind &&
+               num_layers   == rhs_c.num_layers &&
                hidden_size  == rhs_c.hidden_size &&
                num_kv_heads == rhs_c.num_kv_heads &&
                head_dim     == rhs_c.head_dim &&
@@ -67,13 +70,13 @@ struct megakernel : public primitive_base<megakernel> {
     void save(BinaryOutputBuffer& ob) const override {
         primitive_base<megakernel>::save(ob);
         ob << num_layers << hidden_size << num_kv_heads << head_dim
-           << num_heads << intermediate_size << rms_norm_eps;
+           << num_heads << intermediate_size << rms_norm_eps << kind;
     }
 
     void load(BinaryInputBuffer& ib) override {
         primitive_base<megakernel>::load(ib);
         ib >> num_layers >> hidden_size >> num_kv_heads >> head_dim
-           >> num_heads >> intermediate_size >> rms_norm_eps;
+           >> num_heads >> intermediate_size >> rms_norm_eps >> kind;
     }
 };
 
