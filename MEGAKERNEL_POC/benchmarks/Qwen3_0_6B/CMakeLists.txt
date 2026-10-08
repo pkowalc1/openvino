@@ -4,7 +4,7 @@ project(qwen06b_random_decode_benchmark LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(MEGAKERNEL_IMPLEMENTATION "Qwen06BPOC" CACHE STRING
+set(MEGAKERNEL_IMPLEMENTATION "Qwen06BPOC_prefill_separate_kernels" CACHE STRING
     "Megakernel implementation to benchmark from MEGAKERNEL_POC/megakernels")
 set(MEGAKERNEL_IMPLEMENTATION_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../../megakernels/${MEGAKERNEL_IMPLEMENTATION}")

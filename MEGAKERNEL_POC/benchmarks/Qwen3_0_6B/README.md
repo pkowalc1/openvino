@@ -31,9 +31,9 @@ cmake --build /tmp/qwen06b-bench2-build -j8
 /tmp/qwen06b-bench2-build/qwen06b_random_decode_benchmark --context-tokens=128
 ```
 
-The `Qwen06BPOC_prefill_separate_kernels` implementation additionally requires
-the OpenVINO build's `onednn_gpu_tgt` target and cannot be linked by this
-standalone CMake project.
+The `Qwen06BPOC_prefill_separate_kernels` implementation builds the repository's
+oneDNN GPU dependency as part of this standalone CMake project, so its initial
+build takes longer than the other implementations.
 
 Prefill and decode are timed separately using GPU timestamps on an in-order
 queue. The prefill measurement repeats the same context at position zero after
