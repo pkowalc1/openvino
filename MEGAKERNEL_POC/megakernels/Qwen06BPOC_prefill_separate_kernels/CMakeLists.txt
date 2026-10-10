@@ -16,6 +16,23 @@ if(NOT TARGET OpenCL::OpenCL)
     find_package(OpenCL REQUIRED)
 endif()
 
+if(TARGET onednn_gpu_tgt)
+    set(MEGAKERNEL_DNNL_TARGET onednn_gpu_tgt)
+else()
+    set(MEGAKERNEL_DNNL_TARGET dnnl)
+endif()
+
+if(NOT TARGET onednn_gpu_tgt AND NOT TARGET dnnl)
+    set(DNNL_CPU_RUNTIME NONE CACHE STRING "Disable oneDNN CPU runtime" FORCE)
+    set(DNNL_GPU_RUNTIME OCL CACHE STRING "Use OpenCL oneDNN GPU runtime" FORCE)
+    set(DNNL_GPU_VENDOR INTEL CACHE STRING "Build oneDNN for Intel GPUs" FORCE)
+    set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "Disable oneDNN examples")
+    set(DNNL_BUILD_TESTS OFF CACHE BOOL "Disable oneDNN tests")
+    set(ONEDNN_BUILD_GRAPH OFF CACHE BOOL "Disable oneDNN graph component")
+    add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../src/plugins/intel_gpu/thirdparty/onednn_gpu"
+        "${CMAKE_CURRENT_BINARY_DIR}/onednn" EXCLUDE_FROM_ALL)
+endif()
+
 add_library(${TARGET_NAME} SHARED
     megakernelImpl.cpp
     impl/qwen06BPOCRuntime.cpp
@@ -39,6 +56,6 @@ target_include_directories(${TARGET_NAME}
         "${CMAKE_CURRENT_LIST_DIR}/impl"
         "${TASK_SYSTEM_OPENCL_ROOT}")
 
-target_link_libraries(${TARGET_NAME} PRIVATE OpenCL::OpenCL onednn_gpu_tgt)
+target_link_libraries(${TARGET_NAME} PRIVATE OpenCL::OpenCL ${MEGAKERNEL_DNNL_TARGET})
 
 set_target_properties(${TARGET_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)

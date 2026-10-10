@@ -954,7 +954,7 @@ __attribute__((reqd_work_group_size((NH + KVH) * 16, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void prefill_rope_cache(__global const PrefillCtx* c, int layer) {
     uint lane = get_sub_group_local_id(), head = get_sub_group_id(), token = get_group_id(1);
-    int pos = (int)c->positions[token];
+    int pos = (int)c->positions[0] + token;
     if (head < NH) {
         __global half* query = c->qb + token * QDIM + head * HD;
         float values[8], sum = 0.0f;
@@ -994,7 +994,7 @@ __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void prefill_attention(__global const PrefillCtx* c, int layer) {
     uint lane = get_sub_group_local_id(), query_head = get_group_id(0), token = get_group_id(1);
     uint kv_head = query_head / GQA;
-    int pos = (int)c->positions[token];
+    int pos = (int)c->positions[0] + token;
     __global const half* query = c->qb + token * QDIM + query_head * HD;
     ulong cache_base = ((ulong)layer * KVH + kv_head) * (ulong)c->CS * HD;
     float q[8], acc[8];
