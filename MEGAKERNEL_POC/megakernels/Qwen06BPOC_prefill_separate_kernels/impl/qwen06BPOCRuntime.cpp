@@ -60,27 +60,9 @@ static const char* kKernelSrc = R"CL(
 #include "common/semaphore.hcl"
 
 // ---------------------------------------------------------------------------
-// Compute RMS once per work-group; all GEMV subgroups consume the same value.
-inline float wg_rms(const __global half* h, __local char* slm) {
-    uint lid = get_local_id(0), lane = get_sub_group_local_id(), sgl = get_sub_group_id();
-    float2 v = convert_float2(vload2(0, h + lid * 2));
-    float ss = sub_group_reduce_add(dot(v, v));
-    __local float* partial = (__local float*)slm;
-    if (lane == 0)
-        partial[sgl] = ss;
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (sgl == 0) {
-        ss = lane < get_num_sub_groups() ? partial[lane] : 0.0f;
-        ss = sub_group_reduce_add(ss);
-        if (lane == 0)
-            partial[0] = rsqrt(ss / H + EPS);
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    return partial[0];
-}
-
+// Compute a shared FP32 normalized activation once per layer stage.
 inline void wg_rms2(const __global half* h, const __global half* wn,
-                    __global half* out, __local char* slm) {
+                    __global float* out, __local char* slm) {
     uint lid = get_local_id(0), lane = get_sub_group_local_id(), sgl = get_sub_group_id();
     float2 v = convert_float2(vload2(0, h + lid * 2));
     float ss = sub_group_reduce_add(dot(v, v));
@@ -96,25 +78,30 @@ inline void wg_rms2(const __global half* h, const __global half* wn,
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     float2 norm = convert_float2(vload2(0, wn + lid * 2));
-    vstore2(convert_half2(v * partial[0] * norm), 0, out + lid * 2);
+    vstore2(v * partial[0] * norm, 0, out + lid * 2);
 }
 
-// GEMV with fused RMS + block reads (SIMD16 message per 256-element strip)
-inline void sg_gemv_rms(const __global half* h, const __global half* wn, float rms,
-                        const __global half* w, uint base, uint lane, float* out) {
+// Load immutable weights before waiting for the shared normalized activation.
+inline void sg_gemv_normalized(const __global float* activation,
+                               const __global half* w, uint base, float* out,
+                               volatile __global atomic_int* dependency, int count) {
+    half8 first_low[RPS], first_high[RPS];
+    for (int row=0;row<RPS;row++) {
+        const __global ushort* weights=(const __global ushort*)(w+(ulong)(base+row)*H);
+        first_low[row]=as_half8(intel_sub_group_block_read_us8(weights));
+        first_high[row]=as_half8(intel_sub_group_block_read_us8(weights+SG*8));
+    }
+    WaitForSemaphore_block(0,dependency,count);
     float acc[RPS];
     for (int r = 0; r < RPS; r++) acc[r] = 0;
     for (uint blk = 0; blk < H; blk += SG * 16) {
-        const __global ushort* hp = (const __global ushort*)(h + blk);
-        float8 hlo = convert_float8(as_half8(intel_sub_group_block_read_us8(hp)));
-        float8 hhi = convert_float8(as_half8(intel_sub_group_block_read_us8(hp + SG * 8)));
-        const __global ushort* np = (const __global ushort*)(wn + blk);
-        float8 xlo = hlo*rms*convert_float8(as_half8(intel_sub_group_block_read_us8(np)));
-        float8 xhi = hhi*rms*convert_float8(as_half8(intel_sub_group_block_read_us8(np + SG*8)));
+        const __global uint* input = (const __global uint*)(activation + blk);
+        float8 xlo = as_float8(intel_sub_group_block_read8(input));
+        float8 xhi = as_float8(intel_sub_group_block_read8(input + SG*8));
         for (int r = 0; r < RPS; r++) {
             const __global ushort* wp = (const __global ushort*)(w + (ulong)(base+r)*H + blk);
-            float8 ylo = convert_float8(as_half8(intel_sub_group_block_read_us8(wp)));
-            float8 yhi = convert_float8(as_half8(intel_sub_group_block_read_us8(wp + SG*8)));
+            float8 ylo = convert_float8(blk==0 ? first_low[r] : as_half8(intel_sub_group_block_read_us8(wp)));
+            float8 yhi = convert_float8(blk==0 ? first_high[r] : as_half8(intel_sub_group_block_read_us8(wp + SG*8)));
             float8 p = xlo*ylo + xhi*yhi;
             acc[r] += p.s0+p.s1+p.s2+p.s3+p.s4+p.s5+p.s6+p.s7;
         }
@@ -127,7 +114,15 @@ inline void sg_gemv_rms(const __global half* h, const __global half* wn, float r
 // Plain subgroup GEMV over an fp16 activation (no fused RMS, no split-K):
 // each subgroup fully reduces RPS output rows. Used for o-proj / down-proj.
 inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
-                        uint base, uint lane, float* out) {
+                        uint base, uint lane, float* out,
+                        volatile __global atomic_int* dependency, int count) {
+    half8 first_low[RPS], first_high[RPS];
+    for (int row=0;row<RPS;row++) {
+        const __global ushort* weights=(const __global ushort*)(w+(ulong)(base+row)*IN);
+        first_low[row]=as_half8(intel_sub_group_block_read_us8(weights));
+        first_high[row]=as_half8(intel_sub_group_block_read_us8(weights+SG*8));
+    }
+    WaitForSemaphore_block(0,dependency,count);
     float acc[RPS];
     for (int r=0; r<RPS; r++) acc[r]=0;
     for (uint blk=0; blk<IN; blk+=SG*16) {
@@ -136,8 +131,8 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
         float8 xhi=convert_float8(as_half8(intel_sub_group_block_read_us8(ap+SG*8)));
         for (int r=0; r<RPS; r++) {
             const __global ushort* wp=(const __global ushort*)(w+(ulong)(base+r)*IN+blk);
-            float8 ylo=convert_float8(as_half8(intel_sub_group_block_read_us8(wp)));
-            float8 yhi=convert_float8(as_half8(intel_sub_group_block_read_us8(wp+SG*8)));
+            float8 ylo=convert_float8(blk==0 ? first_low[r] : as_half8(intel_sub_group_block_read_us8(wp)));
+            float8 yhi=convert_float8(blk==0 ? first_high[r] : as_half8(intel_sub_group_block_read_us8(wp+SG*8)));
             float8 p=xlo*ylo+xhi*yhi;
             acc[r]+=p.s0+p.s1+p.s2+p.s3+p.s4+p.s5+p.s6+p.s7;
         }
@@ -147,23 +142,24 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
 
 // ===========================================================================
 // MEGAKERNEL TASKS: the 28-layer decoder expressed as task-system tasks.
-// The persistent grid_barrier monokernel is replaced by a pool of task workers.
-// Each layer stage is decomposed into per-workgroup tiles (tasks); a stage's
-// tasks all wait (via a global atomic counter) for the previous stage to finish,
-// exactly replicating the grid-barrier ordering, and signal their own counter on
-// completion. The GEMV / RMSNorm / RoPE / flash-attention math is unchanged.
+// Projection tasks preload weights before acquiring their activation dependency.
+// Attention partitions publish FP32 partials; the last partition of each head
+// merges them with acquire-release ordering and signals output readiness.
 // ===========================================================================
-#define SGN 16                                 // sub-groups per work-group (LWS 256 / SG 16)
+#define SGN 16                                 // sub-groups per work-group (LWS 512 / SG 32)
 #define TF  1                                  // GEMV tile coarsening (RPS-groups per lane per task)
 #define NT_AQ (QDIM/(RPS*SGN*TF))              // Stage AQ (Q) tile count       = 64
 #define NT_AK (KVDIM/(RPS*SGN*TF))             // Stage AK (K) tile count       = 32
 #define NT_AV (KVDIM/(RPS*SGN*TF))             // Stage AV (V) tile count       = 32
 #define NT_A (NT_AQ+NT_AK+NT_AV)               // Stage A total tile count      = 128
-#define NT_BC (NH+KVH)                          // Stage BC (attn) task count    = 24
+#define NT_BC (NH+KVH)                          // completed attention heads and cache writes
 #define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 32
 #define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 96
 #define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 32
 #define EMBED_IDX (NUM_L*5)                     // sync slot for the embedding stage
+#define ATTN_SPLITS 2
+#define ATTN_SYNC_IDX (EMBED_IDX+1)
+#define NORM_E_IDX (ATTN_SYNC_IDX+NUM_L*NH)
 #define SLM_BYTES ((2*SGN + SGN*NPL*SG)*4)      // flash-decoding partials (lsm_m/lsm_l/lsm_a)
 
 // Per-token context shared by every task: all base pointers plus the scalars
@@ -180,10 +176,11 @@ typedef struct MonoCtx {
     __global const half*  qn; __global const half* kn; __global const half* rf;
     __global half*        qb; __global half* kb; __global half* vb;
     __global half*        xn; __global half* gbuf;
-    __global half*        nbuf;
+    __global float*       nbuf;
     __global half*        kc; __global half* vc;
     __global int*         sync;
     __global long*        past_pos;
+    __global float*       attn_partials;
     int  step; uint CS; uint tok_off;
 } MonoCtx;
 
@@ -203,15 +200,16 @@ inline void mk_embed(const MkTask t, __local char* slm) {
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + EMBED_IDX));
 }
 
-// Materialize the weighted, normalized activation before Stage A.
+// Materialize the weighted FP32 activation before Stage A or Stage E.
 inline void mk_normA(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer;
-    int dep    = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
-    int depcnt = (layer == 0) ? 1         : NT_F;
+    bool post_attention=t.tile!=0;
+    int dep=post_attention ? layer*5+2 : ((layer==0) ? EMBED_IDX : (layer-1)*5+4);
+    int depcnt=post_attention ? NT_D : ((layer==0) ? 1 : NT_F);
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
-    wg_rms2(c->h + c->tok_off, c->wn + layer*H, c->nbuf, slm);
-    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0));
+    wg_rms2(c->h+c->tok_off, (post_attention ? c->pn : c->wn)+layer*H, c->nbuf, slm);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync+(post_attention ? NORM_E_IDX+layer : layer*5)));
 }
 
 // #define GemvBlock_MATRIX_ROWS 2048
@@ -225,20 +223,15 @@ inline void mk_normA(const MkTask t, __local char* slm) {
 inline void mk_stageAQ(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
-    const uint wn_off=layer*H, qw_off=layer*QDIM*H;
-    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
-    int dep = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
-    int depcnt = (layer == 0) ? 1 : NT_F;
+    const uint qw_off=layer*QDIM*H;
+    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync+layer*5);
 
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
-    __global half* h = c->h + c->tok_off;
-    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float o[RPS];
-        sg_gemv_rms(h, c->wn+wn_off, rms, c->qw+qw_off, n, l, o);
+        sg_gemv_normalized(c->nbuf, c->qw+qw_off, n, o, sem, 1);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->qb+n);
     }
 
@@ -264,20 +257,15 @@ inline void mk_stageAQ(const MkTask t, __local char* slm) {
 inline void mk_stageAK(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
-    uint wn_off=layer*H, kw_off=layer*KVDIM*H;
-    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
-    int dep = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
-    int depcnt = (layer == 0) ? 1 : NT_F;
+    uint kw_off=layer*KVDIM*H;
+    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync+layer*5);
 
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
-    __global half* h = c->h + c->tok_off;
-    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float o[RPS];
-        sg_gemv_rms(h, c->wn+wn_off, rms, c->kw+kw_off, n, l, o);
+        sg_gemv_normalized(c->nbuf, c->kw+kw_off, n, o, sem, 1);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->kb+n);
     }
 
@@ -295,20 +283,15 @@ inline void mk_stageAK(const MkTask t, __local char* slm) {
 inline void mk_stageAV(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
-    uint wn_off=layer*H, vw_off=layer*KVDIM*H;
-    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
-    int dep = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
-    int depcnt = (layer == 0) ? 1 : NT_F;
+    uint vw_off=layer*KVDIM*H;
+    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync+layer*5);
 
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
-    __global half* h = c->h + c->tok_off;
-    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float o[RPS];
-        sg_gemv_rms(h, c->wn+wn_off, rms, c->vw+vw_off, n, l, o);
+        sg_gemv_normalized(c->nbuf, c->vw+vw_off, n, o, sem, 1);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->vb+n);
     }
 
@@ -324,13 +307,14 @@ inline void mk_stageAV(const MkTask t, __local char* slm) {
     SignalSemaphore_block(0, sem);
 }
 
-// Stage BC: fused RoPE + flash-decoding attention. tile in [0,NH) is a query
-// head; tile in [NH,NH+KVH) writes the current token's K/V to the cache.
+inline void mk_attention_merge(const MkTask t, __local char* slm);
+
+// Stage BC: fused RoPE + partitioned flash-decoding attention and cache writes.
 inline void mk_stageBC(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer; uint wg = (uint)t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id(), nsgl = get_num_sub_groups();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync+layer*5), NT_A+1);
 
     const float scl = rsqrt((float)HD);
     uint CS = c->CS; int pos = (int)c->past_pos[0] + c->step;
@@ -339,8 +323,8 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
     __local float* lsm_l = lsm_m + SGN;
     __local float (*lsm_a)[NPL][SG] = (__local float(*)[NPL][SG])(lsm_l + SGN);
 
-    if (wg < NH) {
-        uint hq=wg, kv=hq/GQA;
+    if (wg < NH*ATTN_SPLITS) {
+        uint hq=wg/ATTN_SPLITS, split=wg%ATTN_SPLITS, kv=hq/GQA;
         __global half* qhs = c->qb + hq*HD;
         float4 qraw = convert_float4(as_half4(intel_sub_group_block_read_us4((const __global ushort*)qhs)));
         float4 qnorm = convert_float4(as_half4(intel_sub_group_block_read_us4(
@@ -356,8 +340,10 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
             qr[j]=x0*cc-x1*sn; qr[j+NPL/2]=x1*cc+x0*sn;
         }
         ulong base=((ulong)layer*KVH+kv)*(ulong)CS*HD;
-        uint tile=((uint)pos + nsgl - 1)/nsgl;
-        uint s0=sgl*tile, s1=min(s0+tile,(uint)pos);
+        uint partition=((uint)pos+ATTN_SPLITS-1)/ATTN_SPLITS;
+        uint partition_end=min((split+1)*partition,(uint)pos);
+        uint tile=(partition+nsgl-1)/nsgl;
+        uint s0=split*partition+sgl*tile, s1=min(s0+tile,partition_end);
         float acc[NPL]; for (int j=0;j<NPL;j++) acc[j]=0;
         float m=-INFINITY, ls=0;
         for (uint s=s0;s<s1;s++){
@@ -372,7 +358,7 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
             for (int j=0;j<NPL;j++) acc[j]=acc[j]*cr+p*vval[j];
             m=mn;
         }
-        if (sgl==0){
+        if (sgl==0 && split==0){
             __global half* khs = c->kb + kv*HD;
             float4 kraw = convert_float4(as_half4(intel_sub_group_block_read_us4((const __global ushort*)khs)));
             float4 knorm = convert_float4(as_half4(intel_sub_group_block_read_us4(
@@ -399,19 +385,39 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
         for (int j=0;j<NPL;j++) lsm_a[sgl][j][l]=acc[j];
         barrier(CLK_LOCAL_MEM_FENCE);
         if (sgl==0){
-            float M=lsm_m[0], L=lsm_l[0], ac[NPL];
-            for (int j=0;j<NPL;j++) ac[j]=lsm_a[0][j][l];
-            for (uint tt=1;tt<nsgl;tt++){
-                float mn=fmax(M,lsm_m[tt]), cr=native_exp(M-mn), p=native_exp(lsm_m[tt]-mn);
-                L=L*cr+lsm_l[tt]*p;
-                for (int j=0;j<NPL;j++) ac[j]=ac[j]*cr+lsm_a[tt][j][l]*p;
-                M=mn;
+            float M=sub_group_reduce_max(l<nsgl ? lsm_m[l] : -INFINITY);
+            float probability=l<nsgl && lsm_l[l]>0.0f ? native_exp(lsm_m[l]-M) : 0.0f;
+            float L=sub_group_reduce_add(l<nsgl ? lsm_l[l]*probability : 0.0f);
+            float ac[NPL];
+            for (int component=0;component<NPL;component++) ac[component]=0.0f;
+            for (uint subgroup=0;subgroup<nsgl;subgroup++) {
+                float weight=intel_sub_group_shuffle(probability,subgroup);
+                for (int component=0;component<NPL;component++)
+                    ac[component]+=lsm_a[subgroup][component][l]*weight;
             }
-            float il=1.0f/L;
-            for (int j=0;j<NPL;j++) c->xn[hq*HD+l+SG*j]=convert_half(ac[j]*il);
+            __global float* partial=c->attn_partials+wg*(HD+2);
+            for (int j=0;j<NPL;j++) partial[l+SG*j]=ac[j];
+            if (l==0) { partial[HD]=M; partial[HD+1]=L; }
         }
-    } else if (wg < NH+KVH) {
-        uint kvh=wg-NH;
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        __local int* last_partition=(__local int*)slm;
+        if (get_local_id(0)==0) {
+            int completed=atomic_fetch_add_explicit(
+                (volatile __global atomic_int*)(c->sync+ATTN_SYNC_IDX+layer*NH+hq),
+                1,memory_order_acq_rel,memory_scope_device);
+            *last_partition=completed==ATTN_SPLITS-1;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+        bool merge_head=*last_partition;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (merge_head) {
+            MkTask merge=t;
+            merge.tile=hq;
+            mk_attention_merge(merge,slm);
+        }
+        return;
+    } else if (wg < NH*ATTN_SPLITS+KVH) {
+        uint kvh=wg-NH*ATTN_SPLITS;
         if (sgl==0) {
             __global half* kh = c->kb + kvh*HD;
             float4 kraw = convert_float4(as_half4(intel_sub_group_block_read_us4((const __global ushort*)kh)));
@@ -439,18 +445,40 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 1));
 }
 
+inline void mk_attention_merge(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c=t.ctx;
+    uint head=t.tile, lane=get_sub_group_local_id();
+    if (get_sub_group_id()==0) {
+        __global const float* partial=c->attn_partials+head*ATTN_SPLITS*(HD+2);
+        float maximum=partial[HD], denominator=partial[HD+1];
+        float4 accumulator=vload4(0,partial+lane*4);
+        for (uint split=1;split<ATTN_SPLITS;split++) {
+            partial+=HD+2;
+            if (partial[HD+1]==0.0f) continue;
+            float next_maximum=fmax(maximum,partial[HD]);
+            float correction=native_exp(maximum-next_maximum);
+            float probability=native_exp(partial[HD]-next_maximum);
+            denominator=denominator*correction+partial[HD+1]*probability;
+            accumulator=accumulator*correction+vload4(0,partial+lane*4)*probability;
+            maximum=next_maximum;
+        }
+        vstore4(convert_half4(accumulator/denominator),0,c->xn+head*HD+lane*4);
+    }
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync+t.layer*5+1));
+}
+
 // Stage D: O-projection with residual add (h += xn . Wo).
 inline void mk_stageD(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 1), NT_BC);
     uint ow_off=layer*H*QDIM;
     __global half* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS; float o[RPS];
-        sg_gemv_f16(c->xn, c->ow+ow_off, QDIM, n, l, o);
+        sg_gemv_f16(c->xn, c->ow+ow_off, QDIM, n, l, o,
+                (volatile __global atomic_int*)(c->sync+layer*5+1), NT_BC);
         if (l==0) {
             float2 v = convert_float2(vload2(0, h+n)) + (float2)(o[0], o[1]);
             vstore2(convert_half2(v), 0, h+n);
@@ -459,21 +487,19 @@ inline void mk_stageD(const MkTask t, __local char* slm) {
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2));
 }
 
-// Stage E: fused post-attn RMSNorm + gate/up + SiLU.
+// Stage E: gate/up + SiLU using the shared post-attention normalization.
 inline void mk_stageE(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2), NT_D);
-    uint pn_off=layer*H, gw_off=layer*IM*H, uw_off=layer*IM*H;
-    __global half* h = c->h + c->tok_off;
-    float rms = wg_rms(h, slm);
+    uint gw_off=layer*IM*H, uw_off=layer*IM*H;
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float a[RPS], b[RPS];
-        sg_gemv_rms(h, c->pn+pn_off, rms, c->gw+gw_off, n, l, a);
-        sg_gemv_rms(h, c->pn+pn_off, rms, c->uw+uw_off, n, l, b);
+        sg_gemv_normalized(c->nbuf, c->gw+gw_off, n, a,
+                   (volatile __global atomic_int*)(c->sync+NORM_E_IDX+layer), 1);
+        sg_gemv_normalized(c->nbuf, c->uw+uw_off, n, b, NULL, 0);
         if (l==0) {
             float2 av = (float2)(a[0], a[1]), bv = (float2)(b[0], b[1]);
             vstore2(convert_half2((av/(1.0f+native_exp(-av)))*bv), 0, c->gbuf+n);
@@ -487,13 +513,13 @@ inline void mk_stageF(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 3), NT_E);
     uint dw_off=layer*H*IM;
     __global half* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS; float o[RPS];
-        sg_gemv_f16(c->gbuf, c->dw+dw_off, IM, n, l, o);
+        sg_gemv_f16(c->gbuf, c->dw+dw_off, IM, n, l, o,
+                (volatile __global atomic_int*)(c->sync+layer*5+3), NT_E);
         if (l==0) {
             float2 v = convert_float2(vload2(0, h+n)) + (float2)(o[0], o[1]);
             vstore2(convert_half2(v), 0, h+n);
@@ -510,7 +536,7 @@ inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
     const MkTask t = *(const MkTask*)task.payload;
     switch (task.type) {
         case 0: mk_embed(t, slm); break;
-        // case 1: mk_normA(t, slm); break;
+        case 1: mk_normA(t, slm); break;
         case 2: mk_stageAQ(t, slm); break;
         case 3: mk_stageAK(t, slm); break;
         case 4: IN_KERNEL_PROFILE_BLOCK(mk_stageAV(t, slm), "mk_stageAV"); break;
@@ -529,7 +555,7 @@ __attribute__((reqd_work_group_size(THREADS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void mk_task(__constant const TaskManager* taskManager) {
     _Static_assert(SLM_BYTES <= 64*1024, "SLM_BYTES exceeds device SLM capacity");
-    __local char slm[64*1024];
+    __local char slm[SLM_BYTES];
     WorkerMainLoop_block(taskManager, slm);
 }
 
@@ -1089,7 +1115,8 @@ static constexpr int NT_BC = NH + KVH;                  // 24
 static constexpr int NT_D = H_DIM / (RPS * SGN * TF);   // 32
 static constexpr int NT_E = IM_DIM / (RPS * SGN * TF);  // 96
 static constexpr int NT_F = H_DIM / (RPS * SGN * TF);   // 32
-static constexpr int SYNC_N = NUM_L * 5 + 1;            // per-(layer,stage) counters + embed
+static constexpr int ATTN_SPLITS = 2;
+static constexpr int SYNC_N = NUM_L * (6 + NH) + 1;
 
 // Task-worker launch geometry. Like the old monokernel grid, the worker pool
 // must be co-resident on the device: a consumer task spin-waits on its producer
@@ -1097,7 +1124,7 @@ static constexpr int SYNC_N = NUM_L * 5 + 1;            // per-(layer,stage) cou
 // wait would never complete. The safe worker count depends on this (register- and
 // SLM-heavy) kernel's occupancy, not the device max, so it is tunable via
 // OV_MEGAKERNEL_MONO_WG (default). More workers add parallelism to the GEMV
-// stages up to the co-residency cap; attention has NH+KVH=24 independent tasks.
+// stages up to the co-residency cap; attention has NH*ATTN_SPLITS+KVH tasks.
 // Tuned on the B60 (24 Xe-cores): with the LWS=512 (SGN=16) work-group,
 // worker count controls co-resident GEMV
 // parallelism (more outstanding weight loads => higher HBM utilisation) while
@@ -1206,13 +1233,14 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     mVb_ = ualloc(KVDIM * 2);
     mGb_ = ualloc(IM_DIM * 2);
     mXn_ = ualloc(QDIM * 2);
-    mNb_ = ualloc(H_DIM * 2);
+    mNb_ = ualloc(H_DIM * sizeof(float));
     mH_ = ualloc((size_t)MAX_SEQ * H_DIM * 2);
     // Persistent internal KV cache: [NUM_L, KVH, MAX_SEQ, HD] half, K and V.
     mKC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
     mVC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
     // Per-(layer,stage) completion counters (+ embedding). Reset each launch.
     mSync_ = ualloc(SYNC_N * sizeof(int));
+    mAttnPartials_ = ualloc(NH * ATTN_SPLITS * (HD + 2) * sizeof(float));
     // Shared per-token context.
     mCtx_ = ualloc(sizeof(MonoCtxH));
 
@@ -1291,17 +1319,18 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     };
     push(0, 0, 0);  // embedding
     for (int L = 0; L < NUM_L; L++) {
-        // push(1, L, 0);                                 // input RMS scale
-        for (int i = 0; i < NT_AQ; i++)
-            push(2, L, i);  // Stage AQ (Q)
-        for (int i = 0; i < NT_AK; i++)
-            push(3, L, i);  // Stage AK (K)
-        for (int i = 0; i < NT_AV; i++)
-            push(4, L, i);  // Stage AV (V)
-        for (int i = 0; i < NT_BC; i++)
-            push(5, L, i);  // Stage BC (attention)
+        push(1, L, 0);
+        for (int tile = 0; tile < NT_AQ; tile++)
+            push(2, L, tile);
+        for (int tile = 0; tile < NT_AK; tile++)
+            push(3, L, tile);
+        for (int tile = 0; tile < NT_AV; tile++)
+            push(4, L, tile);
+        for (int tile = 0; tile < NH * ATTN_SPLITS + KVH; tile++)
+            push(5, L, tile);
         for (int i = 0; i < NT_D; i++)
             push(6, L, i);  // Stage D  (o-proj)
+        push(1, L, 1);
         for (int i = 0; i < NT_E; i++)
             push(7, L, i);  // Stage E  (gate/up)
         for (int i = 0; i < NT_F; i++)
@@ -1336,6 +1365,7 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     runtimeContext_.kc = mKC_;
     runtimeContext_.vc = mVC_;
     runtimeContext_.sync = mSync_;
+    runtimeContext_.attn_partials = mAttnPartials_;
     runtimeContext_.CS = (unsigned)MAX_SEQ;
     runtimeContext_.qw = weights->q_proj_w;
     runtimeContext_.kw = weights->k_proj_w;
@@ -1682,6 +1712,7 @@ TErrorcode Qwen06BPOCRuntime::Destroy() {
     free_usm(mKC_);
     free_usm(mVC_);
     free_usm(mSync_);
+    free_usm(mAttnPartials_);
     free_usm(mCtx_);
 
     ctx_ = nullptr;

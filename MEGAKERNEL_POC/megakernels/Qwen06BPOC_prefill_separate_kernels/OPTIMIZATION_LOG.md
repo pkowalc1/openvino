@@ -668,3 +668,122 @@ During measurement, the Python benchmark was initially found to load the
 installed wheel's shared object rather than the target-only build output. The
 reported numbers above were collected only after installing the rebuilt
 `libQwen06BPOC_prefill_separate_kernels.so` into the active OpenVINO package.
+
+## Decode: Five Optimization Steps (2026-10-10)
+
+Scope: single-token decode only. Prefill kernels and dispatch were not changed.
+Measurements used `MEGAKERNEL_POC/benchmarks/Qwen3_0_6B/run.sh` on Arc Pro B60,
+with 32 persistent workers, 512 threads per worker, and SIMD32 subgroups.
+
+### Final Results
+
+| Context tokens | Baseline latency | Final latency | Baseline SOL Memory | Final SOL Memory, three runs |
+|---:|---:|---:|---:|---:|
+| 40 | 2.74 ms | 2.73-2.74 ms | 70.94% | 70.97-71.02% |
+| 400 | 2.99 ms | 2.86 ms | 67.99% | 71.12-71.13% |
+| 4000 | 5.60 ms | 4.17-4.18 ms | 52.48% | 70.35-70.38% |
+
+All nine final runs exceeded 70%. Long-context decode latency fell by about
+25%. The 4000-token result has only a small margin above the target; these
+measurements establish the result on this B60, not on other devices or workloads.
+
+Baseline runs used 100 measured decode iterations, five decode warmups, one
+measured prefill, and no prefill warmup. Final runs used 500 measured decode
+iterations with the runner's default prefill setup and five decode warmups:
+
+```sh
+for context in 40 400 4000; do
+    ./MEGAKERNEL_POC/benchmarks/Qwen3_0_6B/run.sh \
+        --context-tokens="$context" --iterations=500
+done
+```
+
+SOL Memory retains the benchmark's original definition: estimated minimum
+transfer bytes divided by GPU latency and B60's 456 GB/s peak. It is effective
+bandwidth, not a hardware-counter measurement of actual memory traffic. Neither
+the byte estimate nor the peak-bandwidth denominator was changed.
+
+### What Worked and Why
+
+1. **Right-size decode SLM.** Reduced each worker's reservation from 64 KiB to
+   the 8,320 bytes needed for attention partials. Retained as a resource reduction,
+   but it did not independently improve performance: 4000-token latency stayed
+   at 5.60 ms. Tests with 24 and 48 workers did not beat the default 32.
+
+2. **Partition flash decode and fuse the per-head merge.** The original attention
+   used only 16 query-head tasks, each scanning a long context. Two context
+   partitions per head expose 32 attention tasks, matching the worker pool and
+   shortening each task's serial scan. Partitions publish FP32 maximum, sum,
+   and accumulator values. The last partition of each head performs the merge
+   directly, avoiding a separately queued merge task and its wait. Four
+   partitions initially improved 4000-token latency to 4.49 ms, but penalized
+   short contexts. Two partitions with an in-task merge reached about 4.28 ms
+   with first-strip preloading, before the final shared-normalization change.
+
+3. **Parallelize the subgroup softmax merge.** Replaced the serial chain of
+   running-maximum updates and repeated accumulator rescaling with subgroup
+   reductions for the common maximum and denominator. Each partial is then
+   rescaled once. This preserves stable softmax mathematics while shortening
+   the merge dependency chain. The measured improvement was small, roughly
+   0.02 ms at 4000 tokens in the intermediate configuration; it was not the
+   main source of the overall gain.
+
+4. **Share FP32 normalization across projection tasks.** Compute input and
+   post-attention normalization once per layer stage into a shared 4 KiB FP32
+   buffer. Previously, every QKV and gate/up task repeated the RMS reduction
+   and normalization work. Projection tasks now wait for the normalized vector
+   and consume it with subgroup block reads. Keeping FP32 avoids introducing
+   an extra FP16 rounding step. This removed about 0.1 ms across contexts and
+   brought all three SOL results above 70%.
+
+5. **Preload immutable weights before activation waits.** QKV, gate, output,
+   and down projection tasks load their first weight strip into FP16 registers
+   before acquiring the producer's activation-ready semaphore. This permits
+   weight traffic to overlap the preceding task's remaining work; dependent
+   activation reads remain after the acquire. The initial version saved about
+   0.04 ms in the split-attention configuration. First-strip loading was retained;
+   preloading the full RMS-projection tile was slower.
+
+These are cumulative experiments with follow-up refinements, not five isolated
+speedups that can be added together.
+
+### What Did Not Work
+
+- Four-token attention batching was slightly slower; an eight-lane-per-token
+  layout was substantially slower. Both passed numerical checks, but the
+  original SIMD32 K/V block-read loop remained faster.
+- Sharing gate/up activations through SLM added stores and a barrier without
+  recovering their cost. Fusing gate/up with register reuse was also slightly
+  slower. Both variants were removed in favor of stage-shared normalization.
+- Interleaving QKV and attention using per-projection-head readiness regressed
+  4000-token latency to 5.23 ms. The overlap did not compensate for losing the
+  throughput of stage-ordered work. Stage ordering was restored; fine-grained
+  synchronization remains only for the attention partition merge.
+- Full-tile weight preloading regressed all contexts, consistent with increased
+  live register state outweighing the extra overlap. No register-pressure
+  profiling was collected to establish that mechanism conclusively.
+
+### Synchronization and Validation
+
+Partial results are published before an acquire-release completion increment.
+The last partition acquires earlier producers' writes, merges its head, and
+signals the output projection. A local barrier is required after every subgroup
+reads the shared last-partition flag: without it, a fast subgroup can reuse the
+same SLM for task dispatch before others have consumed the flag. This race was
+exposed by the interleaved-scheduling experiment and fixed in the retained code.
+Empty subgroup partials contribute zero during the softmax merge.
+
+Original decode outputs were captured before changing the math, using seed 42
+at contexts 40, 400, and 4000. The benchmark now supports untimed
+`--write-decode-reference=PATH` and `--decode-reference=PATH` checks. Final runs
+passed both numerical comparison and exact warmup-versus-final output equality
+at the repeated decode position. Relative L2 errors against the original were
+`7.64e-4`, `7.94e-4`, and `6.49e-4`; maximum absolute errors were approximately
+`0.00244`, `0.00395`, and `0.00292`, respectively. Results are not bit-identical
+to the original because attention reduction ordering changed.
+
+Additional seed-17 runs at contexts 2, 3, 33, and 4095 passed finite-output and
+repeat-determinism checks, covering empty subgroup ranges, uneven partitions,
+and the final valid cache position. These boundary runs did not compare against
+the original implementation. No reference-model accuracy or sequential
+multi-token generation validation was performed in this decode experiment.

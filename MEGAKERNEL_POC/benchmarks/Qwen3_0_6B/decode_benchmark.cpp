@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -56,6 +57,8 @@ struct Options {
     int iterations = 100;
     uint32_t seed = 42;
     bool list_devices = false;
+    std::string write_decode_reference;
+    std::string decode_reference;
 } options;
 
 void check(cl_int status) {
@@ -281,7 +284,15 @@ TEST(Qwen06B, RandomPrefillAndDecodeLatencyAndBandwidth) {
     decode.newTokens = 1;
     for (int index = 0; index < options.warmup; ++index) ASSERT_EQ(runtime->Execute(&decode), 0);
     check(clFinish(device.queue));
-    expect_finite_output(device, decode.hidden_states_out, decode_hidden.size() * sizeof(float));
+    std::vector<float> warmup_output;
+    if (options.warmup > 0) {
+        expect_finite_output(device, decode.hidden_states_out, decode_hidden.size() * sizeof(float));
+        if (!options.write_decode_reference.empty() || !options.decode_reference.empty()) {
+            warmup_output.resize(fixture::hidden);
+            check(device.copy(device.queue, CL_TRUE, warmup_output.data(), decode.hidden_states_out,
+                              warmup_output.size() * sizeof(float), 0, nullptr, nullptr));
+        }
+    }
 
     cl_event begin = nullptr;
     cl_event end = nullptr;
@@ -300,6 +311,44 @@ TEST(Qwen06B, RandomPrefillAndDecodeLatencyAndBandwidth) {
     const bool is_b60 = gpu->name.find("Arc(TM) Pro B60") != std::string::npos;
     print_phase("Prefill", prefill_ns, prefill_bytes, options.prefill_iterations, options.prefill_warmup, is_b60);
     print_phase("Decode", gpu_ns, minimum_bytes, options.iterations, options.warmup, is_b60);
+    if (!options.write_decode_reference.empty() || !options.decode_reference.empty()) {
+        std::vector<float> output(fixture::hidden);
+        check(device.copy(device.queue, CL_TRUE, output.data(), decode.hidden_states_out,
+                          output.size() * sizeof(float), 0, nullptr, nullptr));
+        for (size_t index = 0; index < warmup_output.size(); ++index)
+            EXPECT_EQ(output[index], warmup_output[index]) << "Non-deterministic decode element " << index;
+        if (!options.write_decode_reference.empty()) {
+            std::ofstream reference(options.write_decode_reference);
+            ASSERT_TRUE(reference.is_open());
+            reference << options.context_tokens << ' ' << options.seed << '\n' << std::setprecision(9);
+            for (float value : output) reference << value << '\n';
+            ASSERT_TRUE(reference.good());
+        }
+        if (!options.decode_reference.empty()) {
+            std::ifstream reference(options.decode_reference);
+            int context_tokens = 0;
+            uint32_t seed = 0;
+            ASSERT_TRUE(static_cast<bool>(reference >> context_tokens >> seed));
+            ASSERT_EQ(context_tokens, options.context_tokens);
+            ASSERT_EQ(seed, options.seed);
+            double squared_error = 0.0, squared_reference = 0.0;
+            float max_error = 0.0f;
+            for (size_t index = 0; index < output.size(); ++index) {
+                float expected = 0.0f;
+                ASSERT_TRUE(static_cast<bool>(reference >> expected));
+                ASSERT_TRUE(std::isfinite(expected));
+                const float error = output[index] - expected;
+                max_error = std::max(max_error, std::abs(error));
+                squared_error += static_cast<double>(error) * error;
+                squared_reference += static_cast<double>(expected) * expected;
+                EXPECT_NEAR(output[index], expected, 0.002f + 0.01f * std::abs(expected)) << index;
+            }
+            const double relative_l2 = std::sqrt(squared_error / std::max(squared_reference, 1e-30));
+            std::cout << std::scientific << "Decode reference: relative L2=" << relative_l2
+                      << ", max absolute error=" << max_error << '\n';
+            EXPECT_LT(relative_l2, 0.002);
+        }
+    }
 }
 }  // namespace
 
@@ -318,12 +367,15 @@ int main(int argc, char** argv) {
         else if (const char* v = value("--iterations")) options.iterations = std::stoi(v);
         else if (const char* v = value("--warmup")) options.warmup = std::stoi(v);
         else if (const char* v = value("--seed")) options.seed = static_cast<uint32_t>(std::stoul(v));
+        else if (const char* v = value("--write-decode-reference")) options.write_decode_reference = v;
+        else if (const char* v = value("--decode-reference")) options.decode_reference = v;
         else if (arg == "--list-devices") options.list_devices = true;
         else {
             std::cerr << "Unknown argument: " << arg << "\nUsage: qwen06b_random_decode_benchmark "
                          "[--device=<index|name>] [--context-tokens=N] [--prefill-iterations=N] "
                          "[--prefill-warmup=N] [--iterations=N] "
-                         "[--warmup=N] [--seed=N] [--list-devices] [gtest flags]\n";
+                         "[--warmup=N] [--seed=N] [--write-decode-reference=PATH] "
+                         "[--decode-reference=PATH] [--list-devices] [gtest flags]\n";
             return 2;
         }
     }
