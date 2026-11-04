@@ -5,8 +5,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
+genai_dir="${repo_root}/openvino.genai"
 openvino_version="2026.3.0"
 tokenizers_version="2026.3.0.0"
+
+source "${script_dir}/megakernels.sh"
 
 main() {
     python3 -m venv "${venv_dir}"
@@ -21,13 +24,21 @@ main() {
         "openvino==${openvino_version}" \
         "openvino-tokenizers==${tokenizers_version}" \
         --force-reinstall --no-deps
-    python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
-        --output-dir "${repo_root}/MEGAKERNEL_POC/python/qwen3-0.6b-openvino-ir"
+
+    local entry megakernel model_id task
+    for entry in "${megakernels[@]}"; do
+        read -r megakernel model_id task <<< "${entry}"
+        if [[ ! -d "$(model_dir "${model_id}")" ]]; then
+            python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
+                --model-id "${model_id}" --output-dir "$(model_dir "${model_id}")" --task "${task}"
+        fi
+    done
 
     git clone --recursive --branch 2026.3.0.0 \
-    https://github.com/openvinotoolkit/openvino.genai.git
-    git -C openvino.genai cherry-pick fb6461a27c3c90050281b4d7816fbf6e5ba2534a
+        https://github.com/openvinotoolkit/openvino.genai.git "${genai_dir}"
+    git -C "${genai_dir}" cherry-pick fb6461a27c3c90050281b4d7816fbf6e5ba2534a
 
+    read -r megakernel _ <<< "${megakernels[0]}"
     cmake -S "${repo_root}" -B "${build_dir}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DENABLE_DEBUG_CAPS=ON \
@@ -46,9 +57,9 @@ main() {
         -DENABLE_JS=OFF \
         -DENABLE_WHEEL=ON \
         -DENABLE_TEMPLATE_REGISTRATION=OFF \
-        -DOPENVINO_EXTRA_MODULES=./openvino.genai \
+        -DOPENVINO_EXTRA_MODULES="${genai_dir}" \
         -DCPACK_ARCHIVE_COMPONENT_INSTALL=OFF \
-        -DMEGAKERNEL_IMPLEMENTATION=Qwen06BPOC_prefill_separate_kernels
+        -DMEGAKERNEL_IMPLEMENTATION="${megakernel}"
     cmake --build "${build_dir}" --parallel 16
 }
 

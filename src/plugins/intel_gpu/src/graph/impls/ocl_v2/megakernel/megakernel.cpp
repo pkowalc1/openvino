@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -40,6 +41,27 @@ using cldnn::ocl::ocl_event;
 using cldnn::ocl::ocl_stream;
 
 namespace {
+
+class MegaKernelFastImpl;
+
+// Some frameworks (e.g. genai's VLM pipeline, for inputs_embeds) hand the
+// MegaKernel a plain cl_mem input rather than a USM allocation. input_ptr()
+// stages those through a persistent per-port USM buffer owned by the impl;
+// output_ptr() keeps the strict USM requirement since the plugin allocates
+// MegaKernel outputs itself.
+struct IoCtx {
+    cldnn::primitive_inst* instance;
+    MegaKernelFastImpl* impl;
+};
+
+void* usm_raw(cldnn::memory& m) {
+    OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
+                    "[MegaKernel] port memory must be a USM allocation for the task-system path");
+    return m.buffer_ptr();
+}
+
+mk::MegakernelIo make_io(IoCtx& io_ctx);
+
 // ---------------------------------------------------------------------------
 // MegaKernelFastImpl
 // ---------------------------------------------------------------------------
@@ -86,38 +108,19 @@ public:
         cl_device_id dl_device = eng.get_cl_device().get();
         cl_command_queue queue = cldnn::downcast<cldnn::ocl::ocl_stream>(instance.get_network().get_stream()).get_cl_queue().get();
 
-        // Resolve the raw USM device pointers for every model input/output. The
-        // task-system tasks dereference these directly out of the context struct,
-        // which requires genuine USM device allocations (asserted below).
-        auto usm_raw = [](cldnn::memory& m, const char* name) -> void* {
-            auto at = m.get_allocation_type();
-            bool usm = at == cldnn::allocation_type::usm_device || at == cldnn::allocation_type::usm_host || at == cldnn::allocation_type::usm_shared;
-            OPENVINO_ASSERT(usm, "[MegaKernel] input/output '", name, "' must be a USM allocation for the task-system path");
-            return m.buffer_ptr();
-        };
-
-        // TODO: Specific to Qwen06BPOC, but will have to be generalized to any megakernel runtime with a known constant parameter type.
+        IoCtx io_ctx{&instance, this};
+        const mk::MegakernelIo io = make_io(io_ctx);
         mk::ConstantParamsImpl weights{};
-        weights.q_proj_w = usm_raw(instance.input_memory(5), "q_proj_w");
-        weights.k_proj_w = usm_raw(instance.input_memory(6), "k_proj_w");
-        weights.v_proj_w = usm_raw(instance.input_memory(7), "v_proj_w");
-        weights.o_proj_w = usm_raw(instance.input_memory(8), "o_proj_w");
-        weights.gate_proj_w = usm_raw(instance.input_memory(9), "gate_proj_w");
-        weights.up_proj_w = usm_raw(instance.input_memory(10), "up_proj_w");
-        weights.down_proj_w = usm_raw(instance.input_memory(11), "down_proj_w");
-        weights.input_ln_w = usm_raw(instance.input_memory(12), "input_ln_w");
-        weights.post_attn_ln_w = usm_raw(instance.input_memory(13), "post_attn_ln_w");
-        weights.q_norm_w = usm_raw(instance.input_memory(14), "q_norm_w");
-        weights.k_norm_w = usm_raw(instance.input_memory(15), "k_norm_w");
-        weights.rope_inv_freq = usm_raw(instance.input_memory(16), "rope_inv_freq");
-        // ---
+        mk::TErrorcode rc = FillMegaKernelConstantParams(&weights, &io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelConstantParams failed: ", rc);
 
         // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
         mk::PlatformParamsImpl platformParams{};
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        megakernelRuntime_->Init(&weights, &platformParams);
+        rc = megakernelRuntime_->Init(&weights, &platformParams);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Init failed: ", rc);
     }
 
     cldnn::event::ptr execute(const std::vector<cldnn::event::ptr>& events, cldnn::primitive_inst& instance) override {
@@ -130,18 +133,14 @@ public:
         for (auto& e : events)
             strm.wait_for_events({e});  // inputs ready before we read them
 
-        OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64,
-                        "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
+        IoCtx io_ctx{&instance, this};
+        const mk::MegakernelIo io = make_io(io_ctx);
+        mk::RuntimeParamsImpl params{};
+        mk::TErrorcode rc = FillMegaKernelRuntimeParams(&params, &io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelRuntimeParams failed: ", rc);
 
-        // TODO: Specific to Qwen06BPOC, but will have to be generalized to any megakernel runtime with a known runtime parameter type.
-        mk::RuntimeParamsImpl io{};
-        io.hidden_states = instance.input_memory(0).buffer_ptr();
-        io.position_ids = instance.input_memory(1).buffer_ptr();
-        io.hidden_states_out = instance.output_memory(0).buffer_ptr();
-        io.newTokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
-        // ---
-
-        megakernelRuntime_->Execute(&io);
+        rc = megakernelRuntime_->Execute(&params);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Execute failed: ", rc);
 
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
@@ -154,10 +153,50 @@ public:
         megakernelRuntime_ = nullptr;
     }
 
+    // Non-USM input ports (e.g. genai's VLM pipeline hands inputs_embeds in as a
+    // plain cl_mem) are copied once per execute() into a persistent per-port USM
+    // staging buffer, reallocated only if the port's size grows.
+    void* staged_input_ptr(cldnn::primitive_inst& instance, int port) {
+        auto mem = instance.input_memory_ptr(port);
+        if (cldnn::memory_capabilities::is_usm_type(mem->get_allocation_type()))
+            return mem->buffer_ptr();
+        std::lock_guard<std::mutex> g(stagingMu_);
+        auto& staged = staging_[port];
+        if (!staged || staged->size() < mem->size())
+            staged = instance.get_network().get_engine().allocate_memory(mem->get_layout(), cldnn::allocation_type::usm_device);
+        staged->copy_from(instance.get_network().get_stream(), *mem, true);
+        return staged->buffer_ptr();
+    }
+
 private:
     std::mutex mu_;
+    std::mutex stagingMu_;
+    std::map<int, cldnn::memory::ptr> staging_;
     mk::IMegakernelRuntime* megakernelRuntime_ = nullptr;
 };
+
+// Lets the megakernel library map graph ports onto its own params without depending on cldnn
+mk::MegakernelIo make_io(IoCtx& io_ctx) {
+    const auto& params = io_ctx.instance->get_typed_desc<cldnn::megakernel>()->attrs.params;
+    mk::MegakernelIo io{};
+    io.ctx = &io_ctx;
+    io.input_ptr = [](void* ctx, int port) {
+        auto* c = static_cast<IoCtx*>(ctx);
+        return c->impl->staged_input_ptr(*c->instance, port);
+    };
+    io.output_ptr = [](void* ctx, int port) {
+        return usm_raw(static_cast<IoCtx*>(ctx)->instance->output_memory(port));
+    };
+    io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
+        return static_cast<IoCtx*>(ctx)->instance->get_impl_params()->get_input_layout(port).get_shape().at(axis);
+    };
+    io.output_dim = [](void* ctx, int port, int axis) -> int64_t {
+        return static_cast<IoCtx*>(ctx)->instance->get_impl_params()->get_output_layout(port).get_shape().at(axis);
+    };
+    io.params = params.data();
+    io.params_size = params.size();
+    return io;
+}
 
 }  // namespace
 

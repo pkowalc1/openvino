@@ -20,27 +20,17 @@ namespace ov::intel_gpu {
 
 static void CreateMegaKernelOp(ProgramBuilder& p,
                                       const std::shared_ptr<ov::intel_gpu::op::MegaKernel>& op) {
-    validate_inputs_count(op, {17});
-    auto inputs = p.GetInputInfo(op);
-    const auto& attrs = op->get_attrs();
-
     std::vector<cldnn::input_info> prim_inputs;
-    prim_inputs.reserve(inputs.size());
-    for (auto& ii : inputs)
+    for (auto& ii : p.GetInputInfo(op))
         prim_inputs.push_back(cldnn::input_info(ii));
 
-    auto prim = cldnn::megakernel(
-        layer_type_name_ID(op),
-        prim_inputs,
-        attrs.num_layers,
-        attrs.hidden_size,
-        attrs.num_kv_heads,
-        attrs.head_dim,
-        attrs.num_attention_heads,
-        attrs.intermediate_size,
-        attrs.rms_norm_eps);
-
+    auto prim = cldnn::megakernel(layer_type_name_ID(op), prim_inputs, op->get_attrs());
     prim.output_data_types = get_output_data_types(op);
+    // The megakernel writes its declared types, so the plugin must not substitute another one.
+    for (size_t i = 0; i < prim.output_data_types.size(); ++i) {
+        OPENVINO_ASSERT(prim.output_data_types[i].value_or(ov::element::dynamic) == op->get_output_element_type(i),
+                        "[MegaKernel] output ", i, " type ", op->get_output_element_type(i), " is not supported by the GPU plugin");
+    }
     p.add_primitive(*op, prim);
 }
 

@@ -410,6 +410,11 @@ uint cos_sin_p = p;
 #endif
 
     uint output_idx = OUTPUT_GET_INDEX(b, h, p, 0);
+#if ENABLE_OUTPUT_TRANSPOSE
+    // Output is [batch, head, seq, dim] while the work item is still indexed in
+    // the input's [batch, seq, head, dim] order, so swap the middle coordinates.
+    output_idx = OUTPUT_GET_INDEX(b, p, h, 0);
+#endif
 
 #if VEC_SIZE == 1
     ACCUMULATOR_TYPE in1 = TO_ACCUMULATOR_TYPE(input[input_idx + r]);

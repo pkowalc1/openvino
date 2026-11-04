@@ -319,24 +319,53 @@ def get_prompts(args) -> list[dict[str, str]]:
 # OV inference helpers
 # ---------------------------------------------------------------------------
 
-def prefill_inputs(input_ids: np.ndarray) -> dict[str, np.ndarray]:
-    seq_len = input_ids.shape[1]
-    return {
-        "input_ids": input_ids.astype(np.int64),
-        "attention_mask": np.ones((BATCH, seq_len), np.int64),
-        "position_ids": np.arange(seq_len, dtype=np.int64).reshape(1, seq_len),
-        "beam_idx": np.zeros(BATCH, np.int32),
-    }
+def is_vlm_layout(model_dir) -> bool:
+    """Multimodal exports (e.g. Gemma-4) ship a language model fed with
+    inputs_embeds instead of openvino_model.xml."""
+    return (Path(model_dir) / "openvino_language_model.xml").exists()
 
 
-def single_token_inputs(token_id: int, position: int) -> dict[str, np.ndarray]:
+class Feeder:
+    """Builds stateful-LM inputs for token ids, for both IR layouts.
+
+    For the VLM layout the text embedding model runs on the same device to turn
+    ids into inputs_embeds; it is only used outside the timed decode loop.
+    """
+
+    def __init__(self, core, model, model_dir: Path, device: str):
+        self.names = {i.get_any_name() for i in model.inputs}
+        self.embed = None
+        if "inputs_embeds" in self.names:
+            emb = core.compile_model(str(model_dir / "openvino_text_embeddings_model.xml"), device,
+                                     {"CACHE_DIR": ""})
+            self.embed = lambda ids: np.array(emb(ids.astype(np.int64))[0], dtype=np.float32)
+
+    def __call__(self, ids: np.ndarray, past: int) -> dict[str, np.ndarray]:
+        seq_len = ids.shape[1]
+        total = past + seq_len
+        feed = {
+            "attention_mask": np.ones((BATCH, total), np.int64),
+            "position_ids": np.arange(past, total, dtype=np.int64).reshape(1, seq_len),
+            "beam_idx": np.zeros(BATCH, np.int32),
+        }
+        if self.embed is None:
+            feed["input_ids"] = ids.astype(np.int64)
+            return feed
+        feed["inputs_embeds"] = self.embed(ids)
+        if "token_type_ids" in self.names:
+            feed["token_type_ids"] = np.zeros((BATCH, seq_len), np.int64)
+        if "per_layer_inputs" in self.names:
+            feed["per_layer_inputs"] = np.zeros((BATCH, seq_len, 1, 0), np.float32)
+        return feed
+
+
+def prefill_inputs(feeder: Feeder, input_ids: np.ndarray) -> dict[str, np.ndarray]:
+    return feeder(input_ids, 0)
+
+
+def single_token_inputs(feeder: Feeder, token_id: int, position: int) -> dict[str, np.ndarray]:
     """One-token step (decode, or one step of token-by-token priming)."""
-    return {
-        "input_ids": np.array([[token_id]], np.int64),
-        "attention_mask": np.ones((BATCH, position + 1), np.int64),
-        "position_ids": np.array([[position]], np.int64),
-        "beam_idx": np.zeros(BATCH, np.int32),
-    }
+    return feeder(np.array([[token_id]], np.int64), position)
 
 
 def load_tokenizer(model_dir: Path):
@@ -394,18 +423,22 @@ def decode_only_worker(args) -> list[dict]:
 
     core = ov.Core()
     dev_name = core.get_property(args.device, "FULL_DEVICE_NAME")
-    model = core.read_model(str(Path(args.model_dir) / "openvino_model.xml"))
+    model_dir = Path(args.model_dir)
+    ir = "openvino_language_model.xml" if is_vlm_layout(model_dir) else "openvino_model.xml"
+    model = core.read_model(str(model_dir / ir))
     t0 = time.perf_counter()
-    compiled = core.compile_model(model, args.device)
+    # CACHE_DIR="" (see optimum_worker): the blob cache key ignores OV_MEGAKERNEL_DISABLE.
+    compiled = core.compile_model(model, args.device, {"CACHE_DIR": ""})
     compile_s = time.perf_counter() - t0
+    feeder = Feeder(core, model, model_dir, args.device)
 
-    tokenizer = load_tokenizer(Path(args.model_dir))
+    tokenizer = load_tokenizer(model_dir)
 
     # Warmup – dummy prefill + a few decode steps
     warm = compiled.create_infer_request()
-    warm.infer(prefill_inputs(np.ones((BATCH, 8), np.int64)))
+    warm.infer(prefill_inputs(feeder, np.ones((BATCH, 8), np.int64)))
     for pos in range(8, 12):
-        warm.infer(single_token_inputs(1, pos))
+        warm.infer(single_token_inputs(feeder, 1, pos))
 
     # Tokenize the fixed prompt (content is irrelevant to the timed section)
     ids = prompt_token_ids(tokenizer, DECODE_ONLY_PROMPT)
@@ -413,30 +446,49 @@ def decode_only_worker(args) -> list[dict]:
 
     # Prefill to populate the KV cache (untimed)
     req = compiled.create_infer_request()
-    res = req.infer(prefill_inputs(ids))
+    res = req.infer(prefill_inputs(feeder, ids))
     logits = np.array(res[0])[0, -1, :].astype(np.float32)
     next_id = int(logits.argmax())
 
     # Optionally prime the KV cache to a longer context
     target_ctx = max(args.decode_ctx, prompt_len)
     for priming_pos in range(prompt_len, target_ctx):
-        req.infer(single_token_inputs(next_id, priming_pos))
+        req.infer(single_token_inputs(feeder, next_id, priming_pos))
 
     decode_pos = target_ctx
     # The same decode input is reused every iteration to isolate kernel cost
-    decode_input = single_token_inputs(next_id, decode_pos)
+    decode_input = single_token_inputs(feeder, next_id, decode_pos)
 
     for _ in range(args.warmup):
         req.infer(decode_input)
     lat = []
-    for _ in range(args.tokens):
-        t = time.perf_counter()
-        req.infer(decode_input)
-        lat.append((time.perf_counter() - t) * 1e3)
+    if args.decode_mode == "greedy":
+        # Real autoregressive decode from a fresh request: every step feeds the
+        # previous argmax. Only infer() is timed. For MoE models this is the
+        # honest number - repeating one token routes every step to the same
+        # experts, which the GPU caches serve far faster than real decoding.
+        greq = compiled.create_infer_request()
+        r = greq.infer(prefill_inputs(feeder, ids))
+        cur = int(np.array(r[0])[0, -1, :].argmax())
+        pos = prompt_len
+        for i in range(args.warmup + args.tokens):
+            step_in = single_token_inputs(feeder, cur, pos)
+            t = time.perf_counter()
+            r = greq.infer(step_in)
+            if i >= args.warmup:
+                lat.append((time.perf_counter() - t) * 1e3)
+            cur = int(np.array(r[0])[0, -1, :].argmax())
+            pos += 1
+        decode_pos = pos
+    else:
+        for _ in range(args.tokens):
+            t = time.perf_counter()
+            req.infer(decode_input)
+            lat.append((time.perf_counter() - t) * 1e3)
 
     # Greedy-decode real text for baseline vs megakernel comparison (untimed,
     # fresh request so the timed loop above is unaffected).
-    text_out = _native_generate_text(compiled, tokenizer, ids, prompt_len, args.tokens)
+    text_out = _native_generate_text(compiled, feeder, tokenizer, ids, prompt_len, args.tokens)
 
     return [{
         "prompt": "decode",
@@ -452,20 +504,26 @@ def decode_only_worker(args) -> list[dict]:
     }]
 
 
-def _native_generate_text(compiled, tokenizer, ids: np.ndarray, prompt_len: int,
+def _native_generate_text(compiled, feeder: Feeder, tokenizer, ids: np.ndarray, prompt_len: int,
                            n_tokens: int) -> str:
     """Greedy-decode real tokens from a fresh request and detokenize."""
     gen_req = compiled.create_infer_request()
-    r = gen_req.infer(prefill_inputs(ids))
+    r = gen_req.infer(prefill_inputs(feeder, ids))
     cur = int(np.array(r[0])[0, -1, :].argmax())
     pos = prompt_len
-    eos = tokenizer.eos_token_id
+    # Gemma-4 ends a turn with <end_of_turn> (id 106), which is listed in
+    # generation_config.json but is not the tokenizer's eos_token.
+    eos = {tokenizer.eos_token_id} - {None}
+    gen_cfg = Path(tokenizer.name_or_path) / "generation_config.json"
+    if gen_cfg.exists():
+        ids_cfg = json.loads(gen_cfg.read_text()).get("eos_token_id", [])
+        eos |= set(ids_cfg if isinstance(ids_cfg, list) else [ids_cfg])
     gen_ids: list[int] = []
     for _ in range(n_tokens):
         gen_ids.append(cur)
-        if eos is not None and cur == eos:
+        if cur in eos:
             break
-        r = gen_req.infer(single_token_inputs(cur, pos))
+        r = gen_req.infer(single_token_inputs(feeder, cur, pos))
         pos += 1
         cur = int(np.array(r[0])[0, -1, :].argmax())
     return tokenizer.decode(gen_ids, skip_special_tokens=True)
@@ -473,7 +531,7 @@ def _native_generate_text(compiled, tokenizer, ids: np.ndarray, prompt_len: int,
 
 def optimum_worker(args) -> list[dict]:
     import torch
-    from optimum.intel import OVModelForCausalLM
+    from optimum.intel import OVModelForCausalLM, OVModelForVisualCausalLM
     from transformers import AutoTokenizer
 
     # Cap torch's intra-op threads. optimum's generate() runs its sampling/
@@ -491,7 +549,8 @@ def optimum_worker(args) -> list[dict]:
     # CACHE_DIR="" disables the compiled-model blob cache. The cache key does not
     # include the OV_MEGAKERNEL_DISABLE env var, so leaving it on would make the
     # MegaKernel run silently reuse the baseline blob (no transformation).
-    model = OVModelForCausalLM.from_pretrained(
+    model_cls = OVModelForVisualCausalLM if is_vlm_layout(args.model_dir) else OVModelForCausalLM
+    model = model_cls.from_pretrained(
         args.model_dir, device=args.device, ov_config={"CACHE_DIR": ""})
     compile_s = time.perf_counter() - t0
 
@@ -570,7 +629,9 @@ def genai_worker(args) -> list[dict]:
     # Baseline uses GenAI's default PagedAttention backend.
     pipeline_kwargs: dict = {"CACHE_DIR": ""}
     pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
-    pipe = ov_genai.LLMPipeline(args.model_dir, args.device, **pipeline_kwargs)
+    vlm = is_vlm_layout(args.model_dir)
+    pipe_cls = ov_genai.VLMPipeline if vlm else ov_genai.LLMPipeline
+    pipe = pipe_cls(args.model_dir, args.device, **pipeline_kwargs)
     compile_s = time.perf_counter() - t0
 
     import openvino as ov
@@ -581,6 +642,11 @@ def genai_worker(args) -> list[dict]:
     cfg.min_new_tokens = args.tokens
     cfg.do_sample = False
     cfg.num_beams = 1
+    if vlm and hasattr(cfg, "apply_chat_template"):
+        cfg.apply_chat_template = False  # prompts below are already templated
+
+    def run(text):
+        return pipe.generate(text, generation_config=cfg) if vlm else pipe.generate([text], cfg)
 
     results = []
     for prompt in get_prompts(args):
@@ -588,12 +654,12 @@ def genai_worker(args) -> list[dict]:
         prompt_len = int(tokenizer([text], return_tensors="np").input_ids.shape[1])
 
         for _ in range(max(1, args.gen_warmup)):
-            pipe.generate([text], cfg)
+            run(text)
 
         ttft_ms, tpot_ms, tput = [], [], []
         gen_text = ""
         for _ in range(args.gen_iters):
-            res = pipe.generate([text], cfg)
+            res = run(text)
             pm = res.perf_metrics
             ttft_ms.append(pm.get_ttft().mean)
             tpot_ms.append(pm.get_tpot().mean)     # decode: mean ms / output token
@@ -643,7 +709,7 @@ def spawn(framework: str, path: str, args) -> list[dict]:
         sys.executable, __file__, "--worker", framework, "--path", path,
         "--model-dir", str(args.model_dir), "--device", args.device,
         "--warmup", str(args.warmup), "--tokens", str(args.tokens),
-        "--decode-ctx", str(args.decode_ctx),
+        "--decode-ctx", str(args.decode_ctx), "--decode-mode", args.decode_mode,
         "--torch-threads", str(args.torch_threads),
         "--gen-warmup", str(args.gen_warmup), "--gen-iters", str(args.gen_iters),
     ]
@@ -680,17 +746,21 @@ def _maybe_print_text(base: list[dict], mega: list[dict]) -> None:
             print(f"    megakernel: {mt!r}")
 
 
-def print_decode_only_table(base: list[dict], mega: list[dict]) -> None:
+def print_decode_only_table(base: list[dict], mega: list[dict], mode: str = "fixed") -> None:
     W = 86
     print()
     print("=" * W)
-    print(" DECODE-ONLY  (OV native API)")
+    print(f" DECODE-ONLY  (OV native API, --decode-mode {mode})")
     print("=" * W)
     print(" How it works:")
     print("   Prefill is executed once (untimed) to warm the KV cache.")
-    print("   Then N identical single-token decode steps are timed at a fixed")
-    print("   KV-cache position.  No prefill latency is measured or reported.")
-    print("   Prompt content does not affect the measured decode cost.")
+    if mode == "greedy":
+        print("   Then N real autoregressive greedy steps are timed (infer() only);")
+        print("   ctx is the final KV-cache length.  No prefill latency is reported.")
+    else:
+        print("   Then N identical single-token decode steps are timed at a fixed")
+        print("   KV-cache position.  No prefill latency is measured or reported.")
+        print("   Prompt content does not affect the measured decode cost.")
     print("   decode_x is the per-token decode speedup (primary metric).")
     print()
 
@@ -815,6 +885,10 @@ def main() -> None:
                     help="If >0, prime the KV cache to this length before timing decode "
                          "(isolates kernel cost from O(context) attention growth). "
                          "decode_only path only.")
+    ap.add_argument("--decode-mode", choices=("fixed", "greedy"), default="fixed",
+                    help="decode_only: 'fixed' re-runs one token at a fixed position; "
+                         "'greedy' times real autoregressive steps (use for MoE models, "
+                         "whose expert routing changes every token).")
     # optimum / genai generate() benchmark
     ap.add_argument("--torch-threads", type=int, default=23,
                     help="Cap torch intra-op threads in the optimum path "
@@ -854,7 +928,7 @@ def main() -> None:
         base = all_results[fw]["baseline"]
         mega = all_results[fw]["megakernel"]
         if fw == "decode_only":
-            print_decode_only_table(base, mega)
+            print_decode_only_table(base, mega, args.decode_mode)
         elif fw == "optimum":
             print_optimum_table(base, mega, args.tokens)
         elif fw == "genai":

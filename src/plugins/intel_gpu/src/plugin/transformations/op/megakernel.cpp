@@ -13,35 +13,44 @@ MegaKernel::MegaKernel(const ov::OutputVector& inputs, const MegaKernelAttrs& at
 }
 
 bool MegaKernel::visit_attributes(ov::AttributeVisitor& visitor) {
-    visitor.on_attribute("num_layers",          m_attrs.num_layers);
-    visitor.on_attribute("hidden_size",         m_attrs.hidden_size);
-    visitor.on_attribute("num_attention_heads", m_attrs.num_attention_heads);
-    visitor.on_attribute("num_kv_heads",        m_attrs.num_kv_heads);
-    visitor.on_attribute("head_dim",            m_attrs.head_dim);
-    visitor.on_attribute("intermediate_size",   m_attrs.intermediate_size);
-    visitor.on_attribute("rms_norm_eps",        m_attrs.rms_norm_eps);
+    // Flattened to visitor-supported types; output_shapes holds, per output, its rank followed by
+    // (input, axis, value) per dimension.
+    ov::element::TypeVector output_types;
+    std::vector<int64_t> output_shapes;
+    for (const auto& out : m_attrs.outputs) {
+        output_types.push_back(out.type);
+        output_shapes.push_back(static_cast<int64_t>(out.shape.size()));
+        for (const auto& d : out.shape)
+            output_shapes.insert(output_shapes.end(), {d.input, d.axis, d.value});
+    }
+    visitor.on_attribute("output_types", output_types);
+    visitor.on_attribute("output_shapes", output_shapes);
+    visitor.on_attribute("params", m_attrs.params);
+
+    // Rebuild in case the visitor wrote the attributes (deserialization).
+    m_attrs.outputs.clear();
+    size_t pos = 0;
+    for (const auto& type : output_types) {
+        OPENVINO_ASSERT(pos < output_shapes.size(), "[MegaKernel] malformed output_shapes attribute");
+        const auto rank = static_cast<size_t>(output_shapes[pos++]);
+        OPENVINO_ASSERT(pos + 3 * rank <= output_shapes.size(), "[MegaKernel] malformed output_shapes attribute");
+        MegaKernelOutput out{type, {}};
+        for (size_t i = 0; i < rank; ++i, pos += 3)
+            out.shape.push_back({output_shapes[pos], output_shapes[pos + 1], output_shapes[pos + 2]});
+        m_attrs.outputs.push_back(std::move(out));
+    }
+    OPENVINO_ASSERT(pos == output_shapes.size(), "[MegaKernel] malformed output_shapes attribute");
     return true;
 }
 
 void MegaKernel::validate_and_infer_types() {
-    // Port 0: hidden_states [B, S, hidden_size]
-    const auto& hs_ps   = get_input_partial_shape(0);
-
-    const int64_t H = m_attrs.hidden_size;
-
-    ov::Dimension B = ov::Dimension::dynamic();
-    ov::Dimension S = ov::Dimension::dynamic();
-
-    if (hs_ps.rank().is_static()) {
-        if (hs_ps.rank().get_length() >= 1) B = hs_ps[0];
-        if (hs_ps.rank().get_length() >= 2) S = hs_ps[1];
-    }
-
-    const auto out_et = ov::element::f32;
-    // Single output: hidden_states_out [B, S, hidden_size] (f32, matches model.norm).
-    // The KV cache is kept entirely inside the plugin impl (MegaKernelFastImpl), so
-    // the op exposes no KV outputs and the pass drops the KV-cache Assign sinks.
-    set_output_type(0, out_et, ov::PartialShape{B, S, H});
+    NODE_VALIDATION_CHECK(this, !m_attrs.outputs.empty(), "MegaKernel must have at least one output");
+    std::vector<ov::PartialShape> input_shapes;
+    for (size_t i = 0; i < get_input_size(); ++i)
+        input_shapes.push_back(get_input_partial_shape(i));
+    set_output_size(m_attrs.outputs.size());
+    for (size_t i = 0; i < m_attrs.outputs.size(); ++i)
+        set_output_type(i, m_attrs.outputs[i].type, megakernel_output_shape(m_attrs.outputs[i], input_shapes));
 }
 
 std::shared_ptr<ov::Node> MegaKernel::clone_with_new_inputs(const ov::OutputVector& new_args) const {
