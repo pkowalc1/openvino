@@ -7,6 +7,7 @@
 
 #include "intel_gpu/op/indirect_sdpa.hpp"
 #include "intel_gpu/op/kv_cache.hpp"
+#include "intel_gpu/op/megakernel.hpp"
 #include "intel_gpu/op/sdpa.hpp"
 #include "intel_gpu/plugin/remote_context.hpp"
 #include "intel_gpu/primitives/paged_attention.hpp"
@@ -69,6 +70,10 @@ bool requires_new_shape_infer(const std::shared_ptr<ov::Node>& op) {
         return true;
 
     if (ov::is_type<ov::op::internal::GatedDeltaNet>(op))
+        return true;
+
+    // A megakernel may have several outputs, which only the new shape infer flow maps correctly.
+    if (ov::is_type<ov::intel_gpu::op::MegaKernel>(op))
         return true;
 
     if (ov::is_type<ov::op::v5::Loop>(op)) {
