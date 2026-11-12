@@ -1091,7 +1091,7 @@ __kernel void prefill_elementwise(__global const PrefillCtx* c, int layer, int o
 static constexpr int NUM_L = 28, H_DIM = 1024, KVH = 8, HD = 128;
 static constexpr int NH = 16, IM_DIM = 3072;
 static constexpr int QDIM = NH * HD, KVDIM = KVH * HD;
-static constexpr int MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
+static constexpr int MAX_SEQ = 128000;  // capacity of the internal KV cache (per layer/head)
 
 static constexpr int ATTN_SPLITS = 2;
 static constexpr int SYNC_N = NUM_L * (6 + NH) + 2;
