@@ -7,6 +7,10 @@ build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
 openvino_version="2026.3.0"
 tokenizers_version="2026.3.0.0"
+megakernel="${MEGAKERNEL:-Qwen06BPOC_prefill_separate_kernels}"
+model_id="${MODEL_ID:-Qwen/Qwen3-0.6B}"
+model_name="${model_id##*/}"
+model_dir="${MODELS_DIR:-${repo_root}/MEGAKERNEL_POC/python}/${model_name,,}-openvino-ir"
 
 main() {
     python3 -m venv "${venv_dir}"
@@ -21,8 +25,13 @@ main() {
         "openvino==${openvino_version}" \
         "openvino-tokenizers==${tokenizers_version}" \
         --force-reinstall --no-deps
-    python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
-        --output-dir "${repo_root}/MEGAKERNEL_POC/python/qwen3-0.6b-openvino-ir"
+    if [[ ! -d "${model_dir}" ]]; then
+        # Export next to the target and rename, so a killed export never leaves a half-written IR.
+        # shellcheck disable=SC2086  # EXPORT_ARGS is a list of CLI flags
+        python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" --overwrite \
+            --model-id "${model_id}" --output-dir "${model_dir}.partial" ${EXPORT_ARGS:-}
+        mv "${model_dir}.partial" "${model_dir}"
+    fi
 
     git clone --recursive --branch 2026.3.0.0 \
     https://github.com/openvinotoolkit/openvino.genai.git
@@ -48,7 +57,7 @@ main() {
         -DENABLE_TEMPLATE_REGISTRATION=OFF \
         -DOPENVINO_EXTRA_MODULES=./openvino.genai \
         -DCPACK_ARCHIVE_COMPONENT_INSTALL=OFF \
-        -DMEGAKERNEL_IMPLEMENTATION=Qwen06BPOC_prefill_separate_kernels
+        -DMEGAKERNEL_IMPLEMENTATION="${megakernel}"
     cmake --build "${build_dir}" --parallel 16
 }
 
