@@ -28,8 +28,8 @@ on every request, and only the selected tokens are projected.
 Verification on GPU.1 (Arc Pro B60), using local-build Python bindings:
 
 ```bash
-MEGAKERNEL_QUICK_TIMEOUT=900 ./MEGAKERNEL_POC/scripts/compile_run_megakernel.sh \
-  --quick --frameworks decode_only optimum genai --tokens 100
+./MEGAKERNEL_POC/scripts/compile_run_megakernel.sh qwen --quick-timeout 900 \
+  --quick-build --frameworks decode_only optimum genai --tokens 100
 ```
 
 | Framework | Prompt tokens reported by harness | Baseline decode ms/token | MK decode ms/token | Decode speedup | Baseline/MK TTFT ms |

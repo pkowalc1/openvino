@@ -9,26 +9,17 @@ on:
 
 jobs:
   Megakernel-CI:
-    name: Megakernel-CI (${{ matrix.megakernel }})
+    name: Megakernel-CI (${{ matrix.model }})
     runs-on: self-hosted
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - megakernel: Qwen06BPOC_prefill_separate_kernels
-            model_id: Qwen/Qwen3-0.6B
-          - megakernel: Gemma4POC
-            model_id: google/gemma-4-26B-A4B-it
-            export_args: --task image-text-to-text --weight-format int4
+        model: [qwen, gemma]
     env:
-      MEGAKERNEL: ${{ matrix.megakernel }}
-      MODEL_ID: ${{ matrix.model_id }}
-      EXPORT_ARGS: ${{ matrix.export_args }}
       # Exported IRs persist across runs.
       MODELS_HOST_DIR: /opt/home/sys_ovwindev/CI_pkowalc1/persistent/megakernel_models_ir
-      MODELS_DIR: /models
     steps:
       - name: Cleanup workspace
         if: always()
@@ -49,9 +40,9 @@ jobs:
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
-            -v "$MODELS_HOST_DIR:$MODELS_DIR" \
+            -v "$MODELS_HOST_DIR:/models" \
             -w /workspace/repo \
-            -e GITHUB_TOKEN -e MEGAKERNEL -e MODEL_ID -e EXPORT_ARGS -e MODELS_DIR \
+            -e GITHUB_TOKEN \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
@@ -63,9 +54,9 @@ jobs:
               git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $github_auth"
               unset github_auth GITHUB_TOKEN
               echo "building megakernel:"
-              bash MEGAKERNEL_POC/ci_scripts/build_megakernel.sh
+              bash MEGAKERNEL_POC/ci_scripts/build_megakernel.sh "$@"
               echo "DONE! This job'\''s status is ${{ job.status }}."
-            '
+            ' -- '${{ matrix.model }}' --models-dir /models
 
       - name: Run tests and benchmarks
         env:
@@ -73,20 +64,19 @@ jobs:
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
-            -v "$MODELS_HOST_DIR:$MODELS_DIR:ro" \
+            -v "$MODELS_HOST_DIR:/models:ro" \
             -w /workspace/repo \
-            -e MODEL_ID -e MODELS_DIR \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
               set -Eeuo pipefail
               git config --global --add safe.directory /workspace/repo
-              if [[ "${MODEL_ID}" == "google/gemma-4-26B-A4B-it" ]]; then
+              if [[ "$1" == "gemma" ]]; then
                 unset OV_MEGAKERNEL_PF_MIN OV_MEGAKERNEL_PF_ATTN_SIMPLE
                 export OV_MEGAKERNEL_PASSES=123
               fi
               echo "running megakernel tests:"
-              bash MEGAKERNEL_POC/ci_scripts/run_megakernel_tests.sh
+              bash MEGAKERNEL_POC/ci_scripts/run_megakernel_tests.sh "$@"
               echo "DONE! This job'\''s status is ${{ job.status }}."
-            '
+            ' -- '${{ matrix.model }}' --models-dir /models
 
