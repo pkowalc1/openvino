@@ -2,14 +2,15 @@
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${script_dir}/megakernel_profile.sh"
+source "${script_dir}/mk_config.sh"
+source "${script_dir}/mk_utility.sh"
 
 main() {
     local repo_root="$1"
     shift
     local build_dir="${repo_root}/build"
     local venv_dir="${build_dir}/venv"
-    local -A options profile
+    local -A options mk_config
     local -a extra_args export_args
     parse_megakernel_args test "${repo_root}/MEGAKERNEL/EXPORTED_MODELS" options extra_args "$@" || {
         megakernel_usage "${0##*/}" test >&2
@@ -19,7 +20,7 @@ main() {
         megakernel_usage "${0##*/}" test
         return
     fi
-    load_megakernel_profile "${options[model]}" "${options[models_dir]}" profile export_args
+    load_mk_config "${options[model]}" "${options[models_dir]}" mk_config export_args
 
     local benchmark_args=(--frameworks decode_only optimum genai --torch-threads 20)
     local runner=(python)
@@ -48,7 +49,7 @@ PY
     fi
 
     "${runner[@]}" "${repo_root}/MEGAKERNEL_POC/python/e2e_performance_measurement.py" \
-        --model-dir "${profile[model_dir]}" "${benchmark_args[@]}" "${extra_args[@]}"
+        --model-dir "${mk_config[model_dir]}" "${benchmark_args[@]}" "${extra_args[@]}"
 }
 
     main "$(cd "${script_dir}/../.." && pwd)" "$@"

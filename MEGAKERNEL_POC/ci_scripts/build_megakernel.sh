@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${script_dir}/megakernel_profile.sh"
+source "${script_dir}/mk_config.sh"
+source "${script_dir}/mk_utility.sh"
 
 setup_dependencies() {
     local install_script="$1"
@@ -55,7 +56,7 @@ main() {
     local venv_dir="${build_dir}/venv"
     local genai_dir="${build_dir}/openvino.genai"
     local stamp_file="${build_dir}/megakernel-dependencies.sha256"
-    local -A options profile
+    local -A options mk_config
     local -a benchmark_args export_args
     parse_megakernel_args build "${repo_root}/MEGAKERNEL/EXPORTED_MODELS" options benchmark_args "$@" || {
         megakernel_usage "${0##*/}" build >&2
@@ -65,9 +66,9 @@ main() {
         megakernel_usage "${0##*/}" build
         return
     fi
-    load_megakernel_profile "${options[model]}" "${options[models_dir]}" profile export_args
-    local megakernel="${profile[kernel]}"
-    local model_dir="${profile[model_dir]}"
+    load_mk_config "${options[model]}" "${options[models_dir]}" mk_config export_args
+    local megakernel="${mk_config[kernel]}"
+    local model_dir="${mk_config[model_dir]}"
 
     if [[ "${options[mode]}" == quick ]]; then
         if ! grep -sEq "^MEGAKERNEL_IMPLEMENTATION:[^=]+=${megakernel}$" "${build_dir}/CMakeCache.txt"; then
@@ -89,7 +90,7 @@ main() {
 
     if [[ ! -d "${model_dir}" ]]; then
         python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" --overwrite \
-            --model-id "${profile[model_id]}" --output-dir "${model_dir}.partial" "${export_args[@]}"
+            --model-id "${mk_config[model_id]}" --output-dir "${model_dir}.partial" "${export_args[@]}"
         mv "${model_dir}.partial" "${model_dir}"
     fi
 

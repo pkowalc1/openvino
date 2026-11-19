@@ -74,35 +74,11 @@ megakernel_usage() {
     if [[ "$2" == local ]]; then
         echo "Available megakernels:"
         local model
-        local -A usage_profile
+        local -A usage_config
         local -a usage_export_args
         for model in qwen gemma; do
-            load_megakernel_profile "${model}" '' usage_profile usage_export_args
-            printf '  %s  %s\n' "${model}" "${usage_profile[kernel]}"
+            load_mk_config "${model}" '' usage_config usage_export_args
+            printf '  %s  %s\n' "${model}" "${usage_config[kernel]}"
         done
     fi
-}
-
-load_megakernel_profile() {
-    local -n profile_output="$3"
-    local -n export_output="$4"
-    case "$1" in
-        qwen)
-            profile_output[kernel]=Qwen06BPOC_prefill_separate_kernels
-            profile_output[model_id]=Qwen/Qwen3-0.6B
-            export_output=()
-            ;;
-        gemma)
-            profile_output[kernel]=Gemma4POC
-            profile_output[model_id]=google/gemma-4-26B-A4B-it
-            export_output=(--task image-text-to-text --weight-format int4)
-            ;;
-        *)
-            echo "Unknown megakernel model: $1 (expected qwen or gemma)" >&2
-            return 2
-            ;;
-    esac
-
-    local model_name="${profile_output[model_id]##*/}"
-    profile_output[model_dir]="$2/${model_name,,}-openvino-ir"
 }
