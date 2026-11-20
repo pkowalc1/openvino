@@ -34,6 +34,9 @@ struct MonoCtxH {
     void* vc = nullptr;
     void* sync = nullptr;
     void* past_pos = nullptr;
+    void* attn_partials = nullptr;
+    void* final_norm = nullptr;
+    void* lm_head = nullptr;
     int step = 0;
     unsigned CS = 0;
     unsigned tok_off = 0;
@@ -70,9 +73,12 @@ private:
     void* mKC_ = nullptr;
     void* mVC_ = nullptr;
     void* mSync_ = nullptr;
+    void* mAttnPartials_ = nullptr;
     void* mCtx_ = nullptr;
     TaskManager taskManager_{};
     cl_mem mTaskMgr_ = nullptr;
+    static constexpr size_t mDecodeLws_ = 1024;
+    static constexpr size_t mDecodeWorkers_ = 34;
     MonoCtxH runtimeContext_{};
 };
 

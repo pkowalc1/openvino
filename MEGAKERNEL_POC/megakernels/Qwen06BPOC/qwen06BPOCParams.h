@@ -18,14 +18,17 @@ public:
     void* q_norm_w;
     void* k_norm_w;
     void* rope_inv_freq;
+    void* final_norm_w;
+    void* lm_head_w;
 };
 
 class Qwen06BRuntimeParams : public IRuntimeParams {
 public:
     void* hidden_states;
     void* position_ids;
-    void* hidden_states_out;
+    void* logits;
     int newTokens;
+    int logitsTokens;
 };
 
 class Qwen06BPlatformParams : public IPlatformParams {

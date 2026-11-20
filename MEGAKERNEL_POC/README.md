@@ -39,7 +39,11 @@ We aim for a similar speedup.
 
 **4. How to build**
 
-For a local build, use `./MEGAKERNEL_POC/compile_run_megakernel.sh`. The first run installs the required dependencies; later runs reuse them and only rebuild, reinstall the generated wheel, and run the benchmarks. Use `./MEGAKERNEL_POC/compile_run_megakernel.sh --clean` to remove generated artifacts and cached setup state before a clean build.
+Run `bash MEGAKERNEL_POC/scripts/compile_run_mk.sh` from the repository root to list the available megakernels without building. Pass `qwen3` or `gemma4` to build and benchmark that model using the same scripts as CI, reusing cached dependencies and exported models on subsequent runs.
+
+Use `--models-dir PATH` to override the default export directory (`MEGAKERNEL/EXPORTED_MODELS`) and `--jobs N` to override the default build parallelism (16). Add `--quick-build` to rebuild the GPU plugin and run a short benchmark against an existing build of that model. Set `--quick-timeout SECONDS` before `--quick-build` to override the default timeout (180 seconds). Arguments after `--quick-build` are passed to the benchmark.
+
+Use `gemma4 --clean` or `qwen3 --clean` to remove the shared local build artifacts and the selected model's export from the default export directory. `--clean` requires a model and never removes exports from a custom `--models-dir`.
 
 **5. Code structure**
 
@@ -47,7 +51,8 @@ For a local build, use `./MEGAKERNEL_POC/compile_run_megakernel.sh`. The first r
 
 * MEGAKERNEL_POC/python - contains python tools to e.g. export the model
 
-* MEGAKERNEL_POC/ci_scripts - contains scripts for CI
+* MEGAKERNEL_POC/scripts/common - shared build and test scripts used by CI and the local wrapper
+* MEGAKERNEL_POC/scripts/dev/qwen3 - Qwen3-specific development and benchmarking helpers
 
 * MEGAKERNEL_POC/research - contains mini R&D projects to test some of the ideas that megakernel can use, e.g. warp-specialized gemv, preloading, etc
 
