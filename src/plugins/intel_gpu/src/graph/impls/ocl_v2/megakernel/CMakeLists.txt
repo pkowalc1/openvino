@@ -1,7 +1,7 @@
 # Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-set(MEGAKERNEL_IMPLEMENTATION "Qwen06BPOC_prefill_separate_kernels" CACHE STRING
+set(MEGAKERNEL_IMPLEMENTATION "Qwen06BPOC" CACHE STRING
         "Megakernel implementation to link from MEGAKERNEL_POC/megakernels")
 
 set(MEGAKERNEL_ROOT "${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/megakernels")

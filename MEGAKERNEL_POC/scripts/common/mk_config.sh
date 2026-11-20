@@ -3,7 +3,7 @@ load_mk_config() {
     local -n export_output="$4"
     case "$1" in
         qwen)
-            config_output[kernel]=Qwen06BPOC_prefill_separate_kernels
+            config_output[kernel]=Qwen06BPOC
             config_output[model_id]=Qwen/Qwen3-0.6B
             export_output=()
             ;;
