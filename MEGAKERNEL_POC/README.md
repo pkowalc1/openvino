@@ -51,7 +51,8 @@ Use `gemma --clean` or `qwen --clean` to remove the shared local build artifacts
 
 * MEGAKERNEL_POC/python - contains python tools to e.g. export the model
 
-* MEGAKERNEL_POC/ci_scripts - contains scripts for CI
+* MEGAKERNEL_POC/scripts/common - shared build and test scripts used by CI and the local wrapper
+* MEGAKERNEL_POC/scripts/dev/qwen3 - Qwen3-specific development and benchmarking helpers
 
 * MEGAKERNEL_POC/research - contains mini R&D projects to test some of the ideas that megakernel can use, e.g. warp-specialized gemv, preloading, etc
 

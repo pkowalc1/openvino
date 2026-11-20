@@ -6,7 +6,7 @@
 - Changed only the multi-token prefill path in `impl/qwen06BPOCRuntime.cpp`.
 - Kept the existing single-token decode task queue unchanged.
 - Preserved all runtime interfaces.
-- Validation command: `bash compile_run_megakernel.sh`.
+- Validation command: `bash MEGAKERNEL_POC/scripts/compile_run_megakernel.sh qwen` from the repository root.
 
 The B60 reports 160 compute units, a maximum work-group size of 1024, 128 KiB of local memory, and support for `cl_intel_subgroup_matrix_multiply_accumulate`.
 

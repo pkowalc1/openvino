@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${script_dir}/../ci_scripts/mk_config.sh"
-source "${script_dir}/../ci_scripts/mk_utility.sh"
+source "${script_dir}/common/mk_config.sh"
+source "${script_dir}/common/mk_utility.sh"
 
 main() {
     local repo_root="$1"
@@ -12,7 +12,7 @@ main() {
         megakernel_usage "${0##*/}" local
         return
     fi
-    local ci_dir="${repo_root}/MEGAKERNEL_POC/ci_scripts"
+    local common_dir="${script_dir}/common"
     local local_models_dir="${repo_root}/MEGAKERNEL/EXPORTED_MODELS"
     local -A options mk_config
     local -a benchmark_args export_args
@@ -45,11 +45,11 @@ main() {
     local common_args=("${options[model]}" --models-dir "${options[models_dir]}")
     if [[ "${options[mode]}" == quick ]]; then
         common_args+=(--quick-timeout "${options[quick_timeout]}")
-        bash "${ci_dir}/build_megakernel.sh" "${common_args[@]}" --jobs "${options[jobs]}" --quick-build
-        bash "${ci_dir}/run_megakernel_tests.sh" "${common_args[@]}" --quick-build "${benchmark_args[@]}"
+        bash "${common_dir}/build_megakernel.sh" "${common_args[@]}" --jobs "${options[jobs]}" --quick-build
+        bash "${common_dir}/run_megakernel_tests.sh" "${common_args[@]}" --quick-build "${benchmark_args[@]}"
     else
-        bash "${ci_dir}/build_megakernel.sh" "${common_args[@]}" --jobs "${options[jobs]}"
-        bash "${ci_dir}/run_megakernel_tests.sh" "${common_args[@]}"
+        bash "${common_dir}/build_megakernel.sh" "${common_args[@]}" --jobs "${options[jobs]}"
+        bash "${common_dir}/run_megakernel_tests.sh" "${common_args[@]}"
     fi
 }
 

@@ -119,4 +119,4 @@ main() {
     cmake --build "${build_dir}" --parallel "${options[jobs]}"
 }
 
-main "$(cd "${script_dir}/../.." && pwd)" "$@"
+main "$(cd "${script_dir}/../../.." && pwd)" "$@"

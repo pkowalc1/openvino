@@ -52,4 +52,4 @@ PY
         --model-dir "${mk_config[model_dir]}" "${benchmark_args[@]}" "${extra_args[@]}"
 }
 
-    main "$(cd "${script_dir}/../.." && pwd)" "$@"
+    main "$(cd "${script_dir}/../../.." && pwd)" "$@"

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-megakernel_root="$(cd "${script_dir}/.." && pwd)"
+megakernel_root="$(cd "${script_dir}/../../.." && pwd)"
 repo_root="$(cd "${megakernel_root}/.." && pwd)"
 build_dir="${BUILD_DIR:-${repo_root}/build}"
 venv_dir="${VENV_DIR:-}"
@@ -87,13 +87,13 @@ unset OV_MEGAKERNEL_DISABLE
 
 if [[ ! -d "${build_dir}/wheels" ]]; then
     echo "Missing local wheel directory: ${build_dir}/wheels" >&2
-    echo "Build the branch first: bash ${script_dir}/compile_run_megakernel.sh" >&2
+    echo "Build the branch first: bash ${megakernel_root}/scripts/compile_run_megakernel.sh" >&2
     exit 1
 fi
 mapfile -t local_wheels < <(find "${build_dir}/wheels" -maxdepth 1 -name '*.whl' -type f -print | sort)
 if [[ ${#local_wheels[@]} -eq 0 ]]; then
     echo "No locally built wheels found in ${build_dir}/wheels" >&2
-    echo "Build the branch first: bash ${script_dir}/compile_run_megakernel.sh" >&2
+    echo "Build the branch first: bash ${megakernel_root}/scripts/compile_run_megakernel.sh" >&2
     exit 1
 fi
 
