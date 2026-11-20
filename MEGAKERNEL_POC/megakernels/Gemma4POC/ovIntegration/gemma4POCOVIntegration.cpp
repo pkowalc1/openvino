@@ -837,7 +837,10 @@ bool replace_attn_in(const std::shared_ptr<RMSOp>& rms_in, bool dbg) {
         cat->get_output_element_type(0) != ov::element::f32)
         return reject("RoPE table concat");
     auto mm = cat->get_input_node_ptr(0)->get_input_node_shared_ptr(0);
-    auto invf = mm && is_op(mm->output(0), "MatMul") ? as_constant(mm->input_value(0)) : nullptr;
+    auto invf_src = mm ? mm->input_value(0) : ov::Output<ov::Node>();
+    while (invf_src.get_node() && (is_op(invf_src, "Broadcast") || is_op(invf_src, "Convert")))
+        invf_src = invf_src.get_node()->input_value(0);
+    auto invf = mm && is_op(mm->output(0), "MatMul") ? as_constant(invf_src) : nullptr;
     const int64_t table_c = cos.get_partial_shape()[3].get_length();
     if (!invf || invf->get_shape() != ov::Shape{1, static_cast<size_t>(table_c / 2), 1} ||
         cat->get_output_partial_shape(0)[2] != table_c)
