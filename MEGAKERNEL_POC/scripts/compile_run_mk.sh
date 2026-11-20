@@ -26,7 +26,6 @@ main() {
         return
     fi
     if [[ -z "${options[model]}" ]]; then
-        echo "Select a megakernel (qwen or gemma)." >&2
         megakernel_usage "${0##*/}" local >&2
         return 2
     fi

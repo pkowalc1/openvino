@@ -4,18 +4,16 @@ parse_megakernel_args() {
     local -n options_output="$3"
     local -n benchmark_output="$4"
     shift 4
-    options_output=([model]=qwen [models_dir]="${default_models_dir}" [jobs]=16 [quick_timeout]=180 [mode]=full)
+    options_output=([model]="${MK_CONFIGS[0]}" [models_dir]="${default_models_dir}" [jobs]=16 [quick_timeout]=180 [mode]=full)
     benchmark_output=()
     if [[ "${entrypoint}" == local ]]; then
         options_output[model]=''
     fi
 
-    case "${1:-}" in
-        qwen|gemma)
-            options_output[model]="$1"
-            shift
-            ;;
-    esac
+    if [[ -n "${1:-}" ]] && is_mk_config "$1"; then
+        options_output[model]="$1"
+        shift
+    fi
 
     while (( $# )); do
         case "$1" in
@@ -62,11 +60,15 @@ parse_megakernel_args() {
 
 megakernel_usage() {
     local mode_options='[--quick-build [benchmark options]]'
-    local model_options='[qwen|gemma]'
+    local model_list
+    local model_options
+    printf -v model_list '%s|' "${MK_CONFIGS[@]}"
+    model_list="${model_list%|}"
+    model_options="[${model_list}]"
     case "$2" in
         local)
             mode_options='[--clean | --quick-build [benchmark options]]'
-            model_options='<qwen|gemma>'
+            model_options="<${model_list}>"
             ;;
         build) mode_options='[--quick-build]' ;;
     esac
@@ -76,7 +78,7 @@ megakernel_usage() {
         local model
         local -A usage_config
         local -a usage_export_args
-        for model in qwen gemma; do
+        for model in "${MK_CONFIGS[@]}"; do
             load_mk_config "${model}" '' usage_config usage_export_args
             printf '  %s  %s\n' "${model}" "${usage_config[kernel]}"
         done
