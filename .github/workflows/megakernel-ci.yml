@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: [qwen, gemma]
+        model: [qwen3, gemma4]
     env:
       # Exported IRs persist across runs.
       MODELS_HOST_DIR: /opt/home/sys_ovwindev/CI_pkowalc1/persistent/megakernel_models_ir
