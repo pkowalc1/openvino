@@ -54,7 +54,7 @@ jobs:
               git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $github_auth"
               unset github_auth GITHUB_TOKEN
               echo "building megakernel:"
-              bash MEGAKERNEL_POC/scripts/common/build_megakernel.sh "$@"
+              bash MEGAKERNEL_POC/scripts/common/build_mk.sh "$@"
               echo "DONE! This job'\''s status is ${{ job.status }}."
             ' -- '${{ matrix.model }}' --models-dir /models
 
@@ -72,7 +72,7 @@ jobs:
               set -Eeuo pipefail
               git config --global --add safe.directory /workspace/repo
               echo "running megakernel tests:"
-              bash MEGAKERNEL_POC/scripts/common/run_megakernel_tests.sh "$@"
+              bash MEGAKERNEL_POC/scripts/common/run_mk_tests.sh "$@"
               echo "DONE! This job'\''s status is ${{ job.status }}."
             ' -- '${{ matrix.model }}' --models-dir /models
 

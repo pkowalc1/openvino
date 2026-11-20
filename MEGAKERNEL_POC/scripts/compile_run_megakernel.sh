@@ -45,11 +45,11 @@ main() {
     local common_args=("${options[model]}" --models-dir "${options[models_dir]}")
     if [[ "${options[mode]}" == quick ]]; then
         common_args+=(--quick-timeout "${options[quick_timeout]}")
-        bash "${common_dir}/build_megakernel.sh" "${common_args[@]}" --jobs "${options[jobs]}" --quick-build
-        bash "${common_dir}/run_megakernel_tests.sh" "${common_args[@]}" --quick-build "${benchmark_args[@]}"
+        bash "${common_dir}/build_mk.sh" "${common_args[@]}" --jobs "${options[jobs]}" --quick-build
+        bash "${common_dir}/run_mk_tests.sh" "${common_args[@]}" --quick-build "${benchmark_args[@]}"
     else
-        bash "${common_dir}/build_megakernel.sh" "${common_args[@]}" --jobs "${options[jobs]}"
-        bash "${common_dir}/run_megakernel_tests.sh" "${common_args[@]}"
+        bash "${common_dir}/build_mk.sh" "${common_args[@]}" --jobs "${options[jobs]}"
+        bash "${common_dir}/run_mk_tests.sh" "${common_args[@]}"
     fi
 }
 
